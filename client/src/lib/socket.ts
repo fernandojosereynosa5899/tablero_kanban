@@ -1,5 +1,12 @@
 import { io, type Socket } from 'socket.io-client';
-import type { Activity, Comment, Task, TaskStatus, UserPublic } from '../types/kanban';
+import type {
+  Activity,
+  Comment,
+  MaintenanceStatus,
+  Task,
+  TaskStatus,
+  UserPublic,
+} from '../types/kanban';
 
 export interface PresencePayload {
   onlineUserIds: string[];
@@ -65,6 +72,7 @@ export interface ServerToClientEvents {
   'attachment:created': (payload: AttachmentCreatedPayload) => void;
   'attachment:deleted': (payload: AttachmentDeletedPayload) => void;
   'activity:new': (activity: Activity) => void;
+  'maintenance:updated': (status: MaintenanceStatus) => void;
 }
 
 export interface TaskMoveEmitPayload {
@@ -91,6 +99,7 @@ export interface SocketHandlers {
   onConnectError?: (error: Error) => void;
   onPresenceUpdate?: (onlineUserIds: string[]) => void;
   onSessionRevoked?: (reason: string) => void;
+  onMaintenanceReject?: () => void;
 }
 
 export function createKanbanSocket(token: string, handlers: SocketHandlers = {}): KanbanSocket {
@@ -109,6 +118,9 @@ export function createKanbanSocket(token: string, handlers: SocketHandlers = {})
   });
 
   socket.on('connect_error', (err) => {
+    if (err?.message === 'maintenance') {
+      handlers.onMaintenanceReject?.();
+    }
     handlers.onConnectError?.(err);
   });
 

@@ -6,6 +6,7 @@ import type {
   Comment,
   HealthResponse,
   LoginResponse,
+  MaintenanceStatus,
   Priority,
   Task,
   TaskAttachment,
@@ -26,9 +27,11 @@ export class ApiError extends Error {
 }
 
 type UnauthorizedHandler = () => void;
+type MaintenanceHandler = (status?: MaintenanceStatus) => void;
 
 let authToken: string | null = null;
 let unauthorizedHandler: UnauthorizedHandler | null = null;
+let maintenanceHandler: MaintenanceHandler | null = null;
 
 export function setApiAuthToken(token: string | null): void {
   authToken = token;
@@ -36,6 +39,10 @@ export function setApiAuthToken(token: string | null): void {
 
 export function setUnauthorizedHandler(handler: UnauthorizedHandler | null): void {
   unauthorizedHandler = handler;
+}
+
+export function setMaintenanceHandler(handler: MaintenanceHandler | null): void {
+  maintenanceHandler = handler;
 }
 
 interface RequestOptions {
@@ -83,6 +90,16 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   }
 
   if (!response.ok) {
+    const isMaintenancePayload =
+      response.status === 503 &&
+      payload !== null &&
+      typeof payload === 'object' &&
+      (payload as { maintenance?: unknown }).maintenance === true;
+
+    if (isMaintenancePayload) {
+      maintenanceHandler?.((payload as { status?: MaintenanceStatus }).status);
+    }
+
     const message =
       payload &&
       typeof payload === 'object' &&
@@ -91,7 +108,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
         ? (payload as { error: string }).error
         : `Error ${response.status} al comunicarse con el servidor`;
 
-    if (response.status === 401 && !skipUnauthorizedCallback) {
+    if (response.status === 401 && !skipUnauthorizedCallback && !isMaintenancePayload) {
       unauthorizedHandler?.();
     }
 
@@ -157,11 +174,32 @@ export interface UpdateSubtaskInput {
   title?: string;
 }
 
+export interface UpdateMaintenanceInput {
+  enabled: boolean;
+  title?: string;
+  message?: string;
+  estimatedMinutes?: number | null;
+}
+
 export const api = {
   health(): Promise<HealthResponse> {
     return request<HealthResponse>('/api/health', {
       skipAuth: true,
       skipUnauthorizedCallback: true,
+    });
+  },
+
+  getMaintenanceStatus(): Promise<MaintenanceStatus> {
+    return request<MaintenanceStatus>('/api/maintenance/status', {
+      skipAuth: true,
+      skipUnauthorizedCallback: true,
+    });
+  },
+
+  updateMaintenanceStatus(input: UpdateMaintenanceInput): Promise<MaintenanceStatus> {
+    return request<MaintenanceStatus>('/api/maintenance', {
+      method: 'PATCH',
+      body: input,
     });
   },
 
@@ -360,7 +398,14 @@ export const api = {
       const contentType = response.headers.get('content-type') ?? '';
       if (contentType.includes('application/json')) {
         try {
-          const payload = (await response.json()) as { error?: unknown };
+          const payload = (await response.json()) as {
+            error?: unknown;
+            maintenance?: unknown;
+            status?: MaintenanceStatus;
+          };
+          if (response.status === 503 && payload.maintenance === true) {
+            maintenanceHandler?.(payload.status);
+          }
           if (typeof payload.error === 'string') message = payload.error;
         } catch {
           // Ignorar error de parseo

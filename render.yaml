@@ -37,3 +37,12 @@ services:
         value: Tablero Kanban
       - key: ATTACHMENTS_QUOTA_MB
         value: "512"
+      - key: MAINTENANCE_MODE
+        value: "false"
+      # Opcionales cuando MAINTENANCE_MODE="true" (si se omiten se usan textos por defecto):
+      # - key: MAINTENANCE_TITLE
+      #   value: ""
+      # - key: MAINTENANCE_MESSAGE
+      #   value: ""
+      # - key: MAINTENANCE_ETA_MINUTES
+      #   value: ""

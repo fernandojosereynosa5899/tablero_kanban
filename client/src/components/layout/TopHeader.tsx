@@ -1,6 +1,6 @@
 import { useMemo } from 'react';
 import { motion } from 'framer-motion';
-import { Calendar, HelpCircle, LogOut, Moon, Sun, Users } from 'lucide-react';
+import { Calendar, HelpCircle, LogOut, Moon, Sun, Users, Wrench } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { getRoleLabel, KANBAN_COLUMNS } from '../../types/kanban';
@@ -10,6 +10,8 @@ interface TopHeaderProps {
   onOpenAvatarStudio: () => void;
   onOpenTeam?: () => void;
   onOpenTutorial: () => void;
+  onOpenMaintenance?: () => void;
+  maintenanceActive?: boolean;
 }
 
 function formatSpanishDate(date: Date): string {
@@ -22,7 +24,13 @@ function formatSpanishDate(date: Date): string {
   return formatted.charAt(0).toUpperCase() + formatted.slice(1);
 }
 
-export function TopHeader({ onOpenAvatarStudio, onOpenTeam, onOpenTutorial }: TopHeaderProps) {
+export function TopHeader({
+  onOpenAvatarStudio,
+  onOpenTeam,
+  onOpenTutorial,
+  onOpenMaintenance,
+  maintenanceActive = false,
+}: TopHeaderProps) {
   const { user, users, maxUsers, tasks, onlineUserIds, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
 
@@ -95,18 +103,53 @@ export function TopHeader({ onOpenAvatarStudio, onOpenTeam, onOpenTutorial }: To
       </button>
 
       {user.role === 'LEADER' ? (
-        <button
-          type="button"
-          onClick={onOpenTeam}
-          className={`inline-flex min-h-[36px] sm:min-h-[34px] items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-200 dark:hover:bg-indigo-500/25 ${
-            mobileFullWidth ? 'flex-1 min-w-0' : ''
-          }`}
-        >
-          <Users className="h-3.5 w-3.5 shrink-0" />
-          <span className="truncate">
-            Equipo ({users.length}/{maxUsers})
-          </span>
-        </button>
+        <>
+          <button
+            type="button"
+            onClick={onOpenTeam}
+            className={`inline-flex min-h-[36px] sm:min-h-[34px] items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-100 dark:border-indigo-500/30 dark:bg-indigo-500/15 dark:text-indigo-200 dark:hover:bg-indigo-500/25 ${
+              mobileFullWidth ? 'min-w-0' : ''
+            }`}
+          >
+            <Users className="h-3.5 w-3.5 shrink-0" />
+            <span className="truncate">
+              Equipo ({users.length}/{maxUsers})
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenMaintenance}
+            aria-pressed={maintenanceActive}
+            title={
+              maintenanceActive
+                ? 'Ventana de mantenimiento activa — clic para configurar o reabrir el tablero'
+                : 'Configurar ventana de mantenimiento'
+            }
+            className={`inline-flex min-h-[36px] sm:min-h-[34px] items-center justify-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition ${
+              maintenanceActive
+                ? 'border-amber-300 bg-amber-50 text-amber-800 ring-1 ring-amber-300/70 hover:bg-amber-100 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-200 dark:ring-amber-500/30 dark:hover:bg-amber-500/25'
+                : 'border-zinc-200 bg-white text-slate-700 shadow-xs hover:border-amber-300 hover:bg-amber-50/60 hover:text-amber-800 dark:border-[#2D3038] dark:bg-[#212329] dark:text-slate-200 dark:hover:border-amber-500/40 dark:hover:bg-[#292C34] dark:hover:text-amber-200'
+            } ${mobileFullWidth ? 'min-w-0' : ''}`}
+          >
+            {maintenanceActive ? (
+              <span className="relative flex h-2 w-2 shrink-0">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-500 opacity-75" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
+              </span>
+            ) : null}
+            <Wrench
+              className={`h-3.5 w-3.5 shrink-0 ${
+                maintenanceActive
+                  ? 'text-amber-600 dark:text-amber-300'
+                  : 'text-slate-500 dark:text-slate-400'
+              }`}
+            />
+            <span className="truncate">
+              {maintenanceActive ? 'Mantenimiento activo' : 'Mantenimiento'}
+            </span>
+          </button>
+        </>
       ) : null}
 
       <button
@@ -166,7 +209,13 @@ export function TopHeader({ onOpenAvatarStudio, onOpenTeam, onOpenTutorial }: To
           </div>
 
           {/* Tira simétrica de cuenta/equipo en móvil */}
-          <div className="flex items-center gap-1.5 w-full md:hidden">
+          <div
+            className={
+              user.role === 'LEADER'
+                ? 'grid grid-cols-2 gap-1.5 w-full md:hidden'
+                : 'flex items-center gap-1.5 w-full md:hidden'
+            }
+          >
             {renderAccountActions(true)}
           </div>
 

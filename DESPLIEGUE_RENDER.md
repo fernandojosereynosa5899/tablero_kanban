@@ -47,7 +47,7 @@ En el plan gratuito de Render existen dos restricciones clave que resuelve la in
    - `GOOGLE_REFRESH_TOKEN`: token obtenido con `npm --prefix server run google:auth` (`<TU_REFRESH_TOKEN>`).
    - `MAIL_NOTIFY_TO`: correo destino que recibirá automáticamente cada archivo subido con el nombre de quien lo subió.
    - *(Respaldo local / opcional)* `SMTP_USER` y `SMTP_PASS`: solo necesarios si no configuras Google OAuth 2.0 y despliegas en un entorno con SMTP saliente permitido.
-4. `JWT_SECRET` se generará automáticamente (`generateValue: true`), `GOOGLE_DRIVE_ROOT_FOLDER` quedará en `Tablero Kanban` y `ATTACHMENTS_QUOTA_MB` queda por defecto en `512` MB (para compatibilidad DB o adjuntos legados).
+4. `JWT_SECRET` se generará automáticamente (`generateValue: true`), `GOOGLE_DRIVE_ROOT_FOLDER` quedará en `Tablero Kanban`, `ATTACHMENTS_QUOTA_MB` queda por defecto en `512` MB (para compatibilidad DB o adjuntos legados) y `MAINTENANCE_MODE` queda en `"false"`.
 
 ## 5. Alternativa manual (sin Blueprint)
 Si creas el servicio manualmente desde **New + → Web Service**:
@@ -66,12 +66,17 @@ Si creas el servicio manualmente desde **New + → Web Service**:
   - `GOOGLE_DRIVE_ROOT_FOLDER` = `Tablero Kanban`
   - `MAIL_NOTIFY_TO` = `<CORREO_DESTINO_NOTIFICACIONES>`
   - `ATTACHMENTS_QUOTA_MB` = `512`
+  - `MAINTENANCE_MODE` = `false`
 - **Variables opcionales de respaldo SMTP (solo local o entornos fuera de Render Free)**:
   - `SMTP_HOST` = `smtp.gmail.com`
   - `SMTP_PORT` = `465`
   - `SMTP_SECURE` = `true`
   - `SMTP_USER` = `<TU_CORREO_GMAIL>`
   - `SMTP_PASS` = `<CLAVE_DE_APLICACION_GMAIL>`
+- **Variables opcionales de personalización de mantenimiento (solo cuando `MAINTENANCE_MODE="true"`)**:
+  - `MAINTENANCE_TITLE` = título personalizado del aviso
+  - `MAINTENANCE_MESSAGE` = mensaje descriptivo para el equipo
+  - `MAINTENANCE_ETA_MINUTES` = duración estimada en minutos (entero `1..1440`)
 
 ## 6. Base de datos, esquema y seed idempotente al arrancar
 Cada vez que inicia el servicio (`npm start` → `npm --prefix server run start:prod`):
@@ -87,7 +92,58 @@ Cada vez que inicia el servicio (`npm start` → `npm --prefix server run start:
 ## 7. Verificación post-despliegue
 1. Abre `https://<tu-app>.onrender.com/api/health` y confirma respuesta HTTP `200` con JSON:
    ```json
-   { "status": "ok", "db": true, "time": "..." }
+   { "status": "ok", "db": true, "maintenance": false, "time": "..." }
    ```
+   *(Importante: `/api/health` responde siempre HTTP `200` aunque el modo mantenimiento esté activo para que Render no considere fallido el servicio ni reinicie el contenedor en bucle).*
 2. Abre `https://<tu-app>.onrender.com/` en el navegador, inicia sesión con `lider` o cualquiera de los integrantes iniciales y verifica la etiqueta **En vivo** (conexión Socket.IO activa).
 3. Recuerda cambiar las contraseñas iniciales desde **Mi Perfil & Avatar → Cambiar Contraseña** o **Equipo** una vez desplegado en producción.
+
+## 8. Ventana de Mantenimiento y regla operativa (Push-First)
+
+Para evitar que el equipo vea errores parciales, fallos de red o pantallas rotas mientras se preparan y suben actualizaciones en Render, el sistema cuenta con una **Ventana de Mantenimiento** integrada.
+
+### Regla operativa obligatoria antes de cada cambio
+Antes de editar o subir cambios grandes al repositorio (`main`), **siempre** sigue estos 3 pasos:
+
+1. **Primer push — activar mantenimiento en `maintenance.json`:**
+   Edita [`maintenance.json`](./maintenance.json) colocando `"enabled": true` junto con un mensaje descriptivo y duración estimada (`estimatedMinutes`), y haz `git push origin main` **primero**:
+   ```json
+   {
+     "enabled": true,
+     "title": "Tablero Kanban en mantenimiento",
+     "message": "Estamos aplicando mejoras y actualizaciones en la plataforma. En unos minutos todo volverá a estar disponible automáticamente.",
+     "estimatedMinutes": 5
+   }
+   ```
+   De este modo Render despliega primero la ventana de mantenimiento y muestra la página de aviso profesional en lugar de errores o caídas.
+2. **Desarrollar y probar localmente:**
+   Realiza los cambios necesarios, compila (`npm run build` / `tsc --noEmit`) y valida localmente las pruebas automatizadas (incluida `npm --prefix server run test:maintenance`).
+3. **Push final — desactivar `maintenance.json`:**
+   Una vez verificados los cambios, devuelve [`maintenance.json`](./maintenance.json) a `"enabled": false` y realiza el `git push origin main` final junto con la entrega verificada.
+
+### Los 3 controles de mantenimiento y su precedencia
+El servidor calcula el estado efectivo (`GET /api/maintenance/status`) siguiendo esta **precedencia estricta**:
+
+1. **Variable de entorno en Render (`MAINTENANCE_MODE=true`) — prioridad máxima (`source: "env"`):**
+   - Útil como interruptor de emergencia desde el panel **Environment** de Render sin tocar Git (`MAINTENANCE_MODE="true"`, con opcionales `MAINTENANCE_TITLE`, `MAINTENANCE_MESSAGE`, `MAINTENANCE_ETA_MINUTES`).
+   - Al provenir de entorno (`canDisableInApp: false`), solo se desactiva cambiando `MAINTENANCE_MODE` a `"false"` en Render.
+2. **Archivo rastreado `maintenance.json` por push (`source: "file"`):**
+   - Control declarativo por Git para los despliegues (*push-first*).
+   - Mientras `"enabled": true`, tiene prioridad sobre la base de datos (`canDisableInApp: false`) y solo se desactiva restaurando `"enabled": false` y haciendo push.
+3. **Botón en vivo `Mantenimiento` en el header del Líder (`source: "database"`):**
+   - Disponible exclusivamente para el rol **`LEADER`** en la barra superior (`TopHeader` → botón **Mantenimiento** / **Mantenimiento activo**).
+   - Persiste el estado en la tabla `SystemConfig` (`key = "global"`) vía `PATCH /api/maintenance`, registra el evento en `ActivityLog` y emite en tiempo real `maintenance:updated` por Socket.IO a todas las sesiones conectadas (`canDisableInApp: true`).
+
+### Comportamiento técnico y verificación
+- **Endpoints y tiempo real:**
+  - `GET /api/health`: siempre HTTP `200` (`{ status: "ok", db: true, maintenance: boolean, time }`).
+  - `GET /api/maintenance/status`: endpoint público de solo lectura con el estado efectivo (`active`, `source`, `canDisableInApp`, `title`, `message`, `estimatedMinutes`, `updatedByName`, `updatedAt`).
+  - `PATCH /api/maintenance`: exclusivo para `LEADER` (`requireAuth` + `requireLeader`); actualiza `SystemConfig` y emite el evento Socket.IO `maintenance:updated`.
+- **Protección para integrantes y acceso del Líder:**
+  - Durante mantenimiento activo, las rutas web (`GET /`, rutas SPA) devuelven HTTP `503` con `Retry-After: 30` y una página HTML autónoma compatible con CSP (`script-src 'self'` cargando `/maintenance-client.js`), auto-verificación cada 10s con recarga automática y el acordeón discreto **Acceso exclusivo Líder**.
+  - `POST /api/auth/login`, rutas `/api/*` y nuevos handshakes Socket.IO bloquean a `MEMBER` y `SUBLEADER` (`HTTP 503 { maintenance: true }` / error `'maintenance'`), mientras el `LEADER` conserva acceso completo.
+- **Pruebas automatizadas:**
+  ```bash
+  npm --prefix server run test:maintenance
+  ```
+  Valida precedencia (`env` > `file` > `database`), `GET /api/health` en `200`, HTML `503` CSP-safe + `/maintenance-client.js`, bloqueo `503` y Socket.IO para integrantes/sublíder, control exclusivo del Líder y emisión `maintenance:updated`.

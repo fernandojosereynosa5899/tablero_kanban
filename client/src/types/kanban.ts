@@ -194,6 +194,19 @@ export interface HealthResponse {
   time: string;
 }
 
+export type MaintenanceSource = 'none' | 'env' | 'file' | 'database';
+
+export interface MaintenanceStatus {
+  active: boolean;
+  source: MaintenanceSource;
+  canDisableInApp: boolean;
+  title: string;
+  message: string;
+  estimatedMinutes: number | null;
+  updatedByName: string | null;
+  updatedAt: string | null;
+}
+
 export interface ColumnMeta {
   status: TaskStatus;
   label: string;

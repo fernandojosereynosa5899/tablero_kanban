@@ -167,6 +167,19 @@ export interface Activity {
   taskId: string | null;
 }
 
+export type MaintenanceSource = 'none' | 'env' | 'file' | 'database';
+
+export interface MaintenanceStatus {
+  active: boolean;
+  source: MaintenanceSource;
+  canDisableInApp: boolean;
+  title: string;
+  message: string;
+  estimatedMinutes: number | null;
+  updatedByName: string | null;
+  updatedAt: string | null;
+}
+
 export type TaskWithRelations = PrismaTask & {
   assignee: PrismaUser | null;
   subtasks: PrismaSubtask[];

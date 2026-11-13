@@ -19,7 +19,8 @@
     "test:auth": "tsx scripts/test-auth.ts",
     "test:realtime": "tsx scripts/test-realtime.ts",
     "test:attachments": "tsx scripts/test-attachments.ts",
-    "test": "npm run test:auth && npm run test:realtime && npm run test:attachments",
+    "test:maintenance": "tsx scripts/test-maintenance.ts",
+    "test": "npm run test:auth && npm run test:realtime && npm run test:attachments && npm run test:maintenance",
     "google:auth": "tsx scripts/google-oauth-setup.ts"
   },
   "prisma": {

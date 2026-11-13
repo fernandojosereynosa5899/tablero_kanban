@@ -151,3 +151,14 @@ model ActivityLog {
 
   @@index([createdAt])
 }
+
+model SystemConfig {
+  key                String   @id
+  maintenanceEnabled Boolean  @default(false)
+  maintenanceTitle   String   @default("Tablero Kanban en mantenimiento")
+  maintenanceMessage String   @default("Estamos aplicando mejoras en el sistema. En unos minutos todo volverá a estar disponible.")
+  estimatedMinutes   Int?
+  updatedById        String?
+  updatedByName      String?
+  updatedAt          DateTime @updatedAt
+}

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Loader2 } from 'lucide-react';
-import { Toaster } from 'sonner';
+import { CheckCircle2, Loader2, ShieldAlert, Wrench } from 'lucide-react';
+import { Toaster, toast } from 'sonner';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { AvatarStudioModal } from './components/avatars/AvatarStudioModal';
 import { ActivityDrawer } from './components/kanban/ActivityDrawer';
@@ -11,19 +11,35 @@ import { OverdueTasksAlert } from './components/kanban/OverdueTasksAlert';
 import { TaskDetailModal } from './components/kanban/TaskDetailModal';
 import { TaskFormModal } from './components/kanban/TaskFormModal';
 import { TopHeader } from './components/layout/TopHeader';
+import { MaintenanceModal } from './components/maintenance/MaintenanceModal';
+import {
+  getMaintenanceSourceLabel,
+  MaintenanceScreen,
+} from './components/maintenance/MaintenanceScreen';
 import { TeamModal } from './components/team/TeamModal';
 import { OnboardingTutorialModal } from './components/tutorial/OnboardingTutorialModal';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { useKanbanMove } from './hooks/useKanbanMove';
 import { useKanbanRealtime, type CelebrationPayload } from './hooks/useKanbanRealtime';
+import { ApiError } from './lib/api';
 import type { Task, TaskStatus } from './types/kanban';
 
 function BoardShell() {
-  const { user, users, tasks, isLoading } = useAuth();
+  const {
+    user,
+    users,
+    tasks,
+    isLoading,
+    maintenanceStatus,
+    refreshMaintenance,
+    updateMaintenance,
+  } = useAuth();
 
   const [avatarStudioOpen, setAvatarStudioOpen] = useState(false);
   const [teamModalOpen, setTeamModalOpen] = useState(false);
+  const [maintenanceModalOpen, setMaintenanceModalOpen] = useState(false);
+  const [endingMaintenance, setEndingMaintenance] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
   const [tutorialOpen, setTutorialOpen] = useState(false);
 
@@ -157,6 +173,21 @@ function BoardShell() {
     [user?.role],
   );
 
+  const handleQuickDisableMaintenance = useCallback(async () => {
+    if (!maintenanceStatus?.canDisableInApp || endingMaintenance) return;
+    setEndingMaintenance(true);
+    try {
+      await updateMaintenance({ enabled: false });
+      toast.success('Mantenimiento finalizado. El tablero fue reabierto para todo el equipo.');
+    } catch (err) {
+      const msg =
+        err instanceof ApiError ? err.message : 'No se pudo finalizar la ventana de mantenimiento.';
+      toast.error(msg);
+    } finally {
+      setEndingMaintenance(false);
+    }
+  }, [maintenanceStatus?.canDisableInApp, endingMaintenance, updateMaintenance]);
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center gap-3 overflow-x-hidden bg-[#F3F4F6] dark:bg-[#111215] text-zinc-600 dark:text-zinc-300">
@@ -166,8 +197,24 @@ function BoardShell() {
     );
   }
 
+  if (maintenanceStatus?.active && !user) {
+    return (
+      <MaintenanceScreen
+        status={maintenanceStatus}
+        onRefresh={refreshMaintenance}
+        allowLeaderLogin
+      />
+    );
+  }
+
   if (!user) {
     return <LoginScreen />;
+  }
+
+  if (maintenanceStatus?.active && user.role !== 'LEADER') {
+    return (
+      <MaintenanceScreen status={maintenanceStatus} onRefresh={refreshMaintenance} />
+    );
   }
 
   return (
@@ -176,7 +223,83 @@ function BoardShell() {
         onOpenAvatarStudio={() => setAvatarStudioOpen(true)}
         onOpenTeam={() => setTeamModalOpen(true)}
         onOpenTutorial={() => setTutorialOpen(true)}
+        onOpenMaintenance={
+          user.role === 'LEADER' ? () => setMaintenanceModalOpen(true) : undefined
+        }
+        maintenanceActive={Boolean(maintenanceStatus?.active)}
       />
+
+      {maintenanceStatus?.active && user.role === 'LEADER' ? (
+        <div
+          role="status"
+          aria-live="polite"
+          className="border-b border-amber-300/80 bg-gradient-to-r from-amber-50 via-amber-50/90 to-indigo-50/90 dark:border-amber-500/30 dark:from-amber-950/60 dark:via-[#1D1B17] dark:to-indigo-950/50"
+        >
+          <div className="mx-auto max-w-[1600px] px-3 py-2.5 sm:px-6 lg:px-8 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex items-start sm:items-center gap-2.5 min-w-0">
+              <span className="mt-0.5 sm:mt-0 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+                <Wrench className="h-4 w-4" />
+              </span>
+              <div className="min-w-0 flex flex-wrap items-center gap-x-2 gap-y-1">
+                <p className="text-xs sm:text-sm font-semibold text-amber-950 dark:text-amber-100">
+                  Ventana de mantenimiento activa para el equipo — los integrantes ven la pantalla
+                  de mantenimiento
+                </p>
+                <span className="inline-flex items-center rounded-full bg-white/80 px-2 py-0.5 text-[11px] font-semibold text-indigo-700 ring-1 ring-indigo-200/80 dark:bg-indigo-500/15 dark:text-indigo-200 dark:ring-indigo-500/30">
+                  {getMaintenanceSourceLabel(maintenanceStatus.source)}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {maintenanceStatus.canDisableInApp ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setMaintenanceModalOpen(true)}
+                    disabled={endingMaintenance}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white/90 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-500/30 dark:bg-[#212329] dark:text-indigo-200 dark:hover:bg-indigo-500/20"
+                  >
+                    Configurar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleQuickDisableMaintenance()}
+                    disabled={endingMaintenance}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white shadow-xs transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
+                  >
+                    {endingMaintenance ? (
+                      <>
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        Finalizando...
+                      </>
+                    ) : (
+                      <>
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        Finalizar mantenimiento
+                      </>
+                    )}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <span className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300/80 bg-white/85 px-2.5 py-1 text-xs font-semibold text-amber-900 dark:border-amber-500/35 dark:bg-[#22201A] dark:text-amber-200">
+                    <ShieldAlert className="h-3.5 w-3.5 text-amber-600 dark:text-amber-300" />
+                    Activado por despliegue/entorno
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setMaintenanceModalOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white/90 px-2.5 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-500/30 dark:bg-[#212329] dark:text-indigo-200 dark:hover:bg-indigo-500/20"
+                  >
+                    Ver detalles
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <main className="mx-auto w-full max-w-[1600px] flex-1 px-3 py-2.5 sm:px-6 sm:py-4 lg:px-8 space-y-2.5 sm:space-y-3.5">
         <KanbanToolbar
@@ -237,11 +360,17 @@ function BoardShell() {
       ) : null}
 
       {user.role === 'LEADER' ? (
-        <TeamModal
-          open={teamModalOpen}
-          onClose={() => setTeamModalOpen(false)}
-          onOpenMyProfile={() => setAvatarStudioOpen(true)}
-        />
+        <>
+          <TeamModal
+            open={teamModalOpen}
+            onClose={() => setTeamModalOpen(false)}
+            onOpenMyProfile={() => setAvatarStudioOpen(true)}
+          />
+          <MaintenanceModal
+            open={maintenanceModalOpen}
+            onClose={() => setMaintenanceModalOpen(false)}
+          />
+        </>
       ) : null}
 
       <ActivityDrawer

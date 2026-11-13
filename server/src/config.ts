@@ -35,6 +35,9 @@ const isProd = nodeEnv === 'production' || isHostedOnRender;
 const parsedPort = Number(process.env.PORT);
 const parsedSmtpPort = Number(process.env.SMTP_PORT);
 const parsedQuotaMb = Number(process.env.ATTACHMENTS_QUOTA_MB);
+const rawMaintenanceMode = process.env.MAINTENANCE_MODE?.trim().toLowerCase() ?? '';
+const rawMaintenanceEta = process.env.MAINTENANCE_ETA_MINUTES?.trim() ?? '';
+const parsedMaintenanceEta = rawMaintenanceEta ? Number(rawMaintenanceEta) : NaN;
 const smtpUser = process.env.SMTP_USER?.trim() || '';
 const smtpPass = process.env.SMTP_PASS?.trim() || '';
 const clientOrigin = process.env.CLIENT_ORIGIN?.trim() || 'http://localhost:5173';
@@ -85,4 +88,11 @@ export const config = {
   googleDriveRootFolder: process.env.GOOGLE_DRIVE_ROOT_FOLDER?.trim() || 'Tablero Kanban',
   attachmentsQuotaMb:
     Number.isFinite(parsedQuotaMb) && parsedQuotaMb >= 16 ? parsedQuotaMb : 512,
+  maintenanceMode: rawMaintenanceMode === 'true' || rawMaintenanceMode === '1',
+  maintenanceTitle: process.env.MAINTENANCE_TITLE?.trim() || 'Tablero Kanban en mantenimiento',
+  maintenanceMessage: process.env.MAINTENANCE_MESSAGE?.trim() || '',
+  maintenanceEtaMinutes:
+    Number.isInteger(parsedMaintenanceEta) && parsedMaintenanceEta > 0
+      ? parsedMaintenanceEta
+      : null,
 } as const;

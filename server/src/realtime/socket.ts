@@ -5,6 +5,7 @@ import { ZodError } from 'zod';
 import { isOriginAllowed } from '../config';
 import { allowSocketMoveEvent, allowSocketTypingEvent } from '../middleware/rateLimit';
 import { verifyJwtAndLoadUser } from '../services/authService';
+import { getMaintenanceStatus } from '../services/maintenanceService';
 import { buildForbiddenMessage, recordSecurityEvent } from '../services/securityService';
 import * as taskService from '../services/taskService';
 import type { Task } from '../types/domain';
@@ -55,13 +56,22 @@ export function setupSocketIO(httpServer: HttpServer): Server {
       return;
     }
 
+    let user: User;
     try {
-      const user = await verifyJwtAndLoadUser(token);
-      socket.data.user = user;
-      next();
+      user = await verifyJwtAndLoadUser(token);
     } catch {
       next(new Error('unauthorized'));
+      return;
     }
+
+    const maintenance = await getMaintenanceStatus().catch(() => null);
+    if (maintenance?.active && user.role !== 'LEADER') {
+      next(new Error('maintenance'));
+      return;
+    }
+
+    socket.data.user = user;
+    next();
   });
 
   const emitPresence = (): void => {
@@ -93,6 +103,12 @@ export function setupSocketIO(httpServer: HttpServer): Server {
           ok: false,
           error: buildForbiddenMessage(user, 'Demasiados movimientos seguidos. Espera un momento.'),
         });
+        return;
+      }
+
+      const maintenance = await getMaintenanceStatus().catch(() => null);
+      if (maintenance?.active && user.role !== 'LEADER') {
+        respond({ ok: false, error: maintenance.message });
         return;
       }
 
@@ -136,6 +152,14 @@ export function setupSocketIO(httpServer: HttpServer): Server {
       }
       emitPresence();
     });
+
+    void getMaintenanceStatus()
+      .then((status) => {
+        if (socket.connected) {
+          socket.emit('maintenance:updated', status);
+        }
+      })
+      .catch(() => {});
   });
 
   registerRealtimeHooks({

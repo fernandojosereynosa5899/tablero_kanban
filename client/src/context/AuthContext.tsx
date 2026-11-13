@@ -11,9 +11,17 @@ import {
   type SetStateAction,
 } from 'react';
 import { toast } from 'sonner';
-import { api, setApiAuthToken, setUnauthorizedHandler, type UpdateMeInput } from '../lib/api';
+import {
+  ApiError,
+  api,
+  setApiAuthToken,
+  setMaintenanceHandler,
+  setUnauthorizedHandler,
+  type UpdateMaintenanceInput,
+  type UpdateMeInput,
+} from '../lib/api';
 import { createKanbanSocket, type KanbanSocket } from '../lib/socket';
-import { MAX_USERS, type Task, type UserPublic } from '../types/kanban';
+import { MAX_USERS, type MaintenanceStatus, type Task, type UserPublic } from '../types/kanban';
 
 const TOKEN_STORAGE_KEY = 'kanban_token';
 
@@ -28,10 +36,13 @@ interface AuthContextValue {
   isConnected: boolean;
   onlineUserIds: string[];
   socket: KanbanSocket | null;
+  maintenanceStatus: MaintenanceStatus | null;
   login: (username: string, password: string) => Promise<void>;
   logout: (message?: string) => void;
   refreshUsers: () => Promise<void>;
   refreshTasks: () => Promise<void>;
+  refreshMaintenance: () => Promise<MaintenanceStatus | null>;
+  updateMaintenance: (input: UpdateMaintenanceInput) => Promise<MaintenanceStatus>;
   updateProfile: (input: UpdateMeInput) => Promise<UserPublic>;
   updateMyPassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }
@@ -61,9 +72,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
   const [socket, setSocket] = useState<KanbanSocket | null>(null);
+  const [maintenanceStatus, setMaintenanceStatus] = useState<MaintenanceStatus | null>(null);
 
   const socketRef = useRef<KanbanSocket | null>(null);
   const suppressRevokeRef = useRef<boolean>(false);
+  const prevMaintenanceActiveRef = useRef<boolean>(false);
 
   const clearSession = useCallback(() => {
     if (socketRef.current) {
@@ -92,6 +105,25 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     [clearSession],
   );
 
+  const refreshMaintenance = useCallback(async (): Promise<MaintenanceStatus | null> => {
+    try {
+      const status = await api.getMaintenanceStatus();
+      setMaintenanceStatus(status);
+      return status;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const updateMaintenance = useCallback(
+    async (input: UpdateMaintenanceInput): Promise<MaintenanceStatus> => {
+      const updated = await api.updateMaintenanceStatus(input);
+      setMaintenanceStatus(updated);
+      return updated;
+    },
+    [],
+  );
+
   useEffect(() => {
     setUnauthorizedHandler(() => {
       clearSession();
@@ -99,6 +131,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
     return () => setUnauthorizedHandler(null);
   }, [clearSession]);
+
+  useEffect(() => {
+    setMaintenanceHandler((status) => {
+      if (status) {
+        setMaintenanceStatus(status);
+      } else {
+        void refreshMaintenance();
+      }
+    });
+    return () => setMaintenanceHandler(null);
+  }, [refreshMaintenance]);
 
   const refreshUsers = useCallback(async () => {
     const res = await api.listUsers();
@@ -111,34 +154,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTasks(list);
   }, []);
 
-  // Validación inicial de token guardado
+  // Validación inicial de token guardado y estado de mantenimiento
   useEffect(() => {
     let active = true;
 
     async function bootstrap() {
+      const statusPromise = api.getMaintenanceStatus().catch(() => null);
       const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
       if (!storedToken) {
         setApiAuthToken(null);
-        if (active) setIsLoading(false);
+        const status = await statusPromise;
+        if (!active) return;
+        if (status) {
+          setMaintenanceStatus((prev) => status ?? prev);
+        }
+        setIsLoading(false);
         return;
       }
 
       setApiAuthToken(storedToken);
       try {
-        const [me, usersRes, tasksList] = await Promise.all([
+        const [status, me, usersRes, tasksList] = await Promise.all([
+          statusPromise,
           api.getMe(),
           api.listUsers(),
           api.listTasks(),
         ]);
         if (!active) return;
+        if (status) {
+          setMaintenanceStatus((prev) => status ?? prev);
+        }
         setToken(storedToken);
         setUser(me);
         setUsers(sortUsersBySlot(usersRes.users));
         setMaxUsers(usersRes.maxUsers);
         setTasks(tasksList);
-      } catch {
+      } catch (err) {
         if (!active) return;
-        clearSession();
+        const status = await statusPromise;
+        if (!active) return;
+        if (status) {
+          setMaintenanceStatus((prev) => status ?? prev);
+        }
+        if (err instanceof ApiError && err.status === 503) {
+          // Conservar el token para recuperar la sesión al finalizar la ventana de mantenimiento
+          setToken(storedToken);
+          setUser(null);
+        } else {
+          clearSession();
+        }
       } finally {
         if (active) setIsLoading(false);
       }
@@ -184,6 +248,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearSession();
         toast.error(reason || 'Tu sesión fue cerrada');
       },
+      onMaintenanceReject: () => {
+        setIsConnected(false);
+        void refreshMaintenance();
+      },
+    });
+
+    activeSocket.on('maintenance:updated', (status) => {
+      setMaintenanceStatus(status);
     });
 
     activeSocket.on('user:created', (createdUser) => {
@@ -296,12 +368,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSocket(null);
       setIsConnected(false);
     };
-  }, [token, user?.id, clearSession]);
+  }, [token, user?.id, clearSession, refreshMaintenance]);
+
+  // Recuperar tablero y sesión automáticamente cuando termina la ventana de mantenimiento
+  useEffect(() => {
+    const isActiveNow = Boolean(maintenanceStatus?.active);
+    const wasActive = prevMaintenanceActiveRef.current;
+    prevMaintenanceActiveRef.current = isActiveNow;
+
+    if (!wasActive || isActiveNow || !token) {
+      return;
+    }
+
+    if (!user) {
+      setApiAuthToken(token);
+      Promise.all([api.getMe(), api.listUsers(), api.listTasks()])
+        .then(([me, usersRes, tasksList]) => {
+          setUser(me);
+          setUsers(sortUsersBySlot(usersRes.users));
+          setMaxUsers(usersRes.maxUsers);
+          setTasks(tasksList);
+        })
+        .catch(() => {
+          clearSession();
+        });
+      return;
+    }
+
+    if (socketRef.current && !socketRef.current.connected) {
+      socketRef.current.connect();
+    }
+    if (user.role !== 'LEADER' || !socketRef.current?.connected) {
+      api.listUsers().then((res) => setUsers(sortUsersBySlot(res.users))).catch(() => {});
+      api.listTasks().then((fresh) => setTasks(fresh)).catch(() => {});
+    }
+  }, [maintenanceStatus?.active, token, user, clearSession]);
 
   // Detección de conectividad del navegador para sincronización a prueba de fallos de red
   useEffect(() => {
     const handleOnline = () => {
       toast.success('Conexión reestablecida. Sincronizando datos...');
+      void refreshMaintenance();
       if (token) {
         api.listTasks().then((fresh) => setTasks(fresh)).catch(() => {});
         api.listUsers().then((res) => setUsers(sortUsersBySlot(res.users))).catch(() => {});
@@ -317,7 +424,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [token]);
+  }, [token, refreshMaintenance]);
 
   const login = useCallback(async (username: string, password: string) => {
     const res = await api.login(username, password);
@@ -377,10 +484,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isConnected,
       onlineUserIds,
       socket,
+      maintenanceStatus,
       login,
       logout,
       refreshUsers,
       refreshTasks,
+      refreshMaintenance,
+      updateMaintenance,
       updateProfile,
       updateMyPassword,
     }),
@@ -394,10 +504,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isConnected,
       onlineUserIds,
       socket,
+      maintenanceStatus,
       login,
       logout,
       refreshUsers,
       refreshTasks,
+      refreshMaintenance,
+      updateMaintenance,
       updateProfile,
       updateMyPassword,
     ],

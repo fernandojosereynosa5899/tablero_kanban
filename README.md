@@ -104,6 +104,7 @@ Construida con **React 19 + TypeScript + Vite + Tailwind CSS v4 + `@dnd-kit`** e
 - **Estudio de Avatares SVG y Tema Claro/Oscuro**: avatares vectoriales ligeros (16 personajes, colores configurables y 8 accesorios) sincronizados en vivo entre sesiones.
 - **Guía de bienvenida integrada**: recorrido guiado de 4 pasos en el primer ingreso y accesible en cualquier momento desde el botón **Guía** en la barra superior.
 - **Archivos adjuntos en Google Drive privado + Proxy JWT y respaldo por Gmail HTTPS**: carga segura mediante `multipart/form-data` (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.txt`, `.csv`; máx. 5 MB por archivo y 10 por tarea) con validación de firma binaria (*magic bytes*) y recompresión previa de imágenes en navegador. En producción (Render Free) almacena los binarios en carpetas privadas de Google Drive (`Tablero Kanban/<Actividad>`) consumiendo **0 bytes binarios en PostgreSQL** para ahorrar la cuota de 1 GB, sirviendo descargas y vistas previas vía **Proxy JWT** (`/api/attachments/:id/download`) con `ETag` (`304`) y sin exponer enlaces de Drive; conserva retrocompatibilidad y fallback automático con deduplicación SHA-256 + `gzip` en PostgreSQL (`AttachmentBlob`). Además envía copia automática por correo vía **Gmail REST API v1 (HTTPS `443`)** —evitando el bloqueo de puertos SMTP `25`/`465`/`587` en Render Free— con respaldo SMTP local.
+- **Ventana de Mantenimiento con triple control (`env` > `file` > `database`)**: muestra automáticamente una pantalla/página de mantenimiento profesional (`HTTP 503` CSP-safe con auto-verificación y recarga automática al terminar) mientras protege el backend (`503` para `MEMBER`/`SUBLEADER` en login, REST y Socket.IO). Permite activar el mantenimiento desde Render (`MAINTENANCE_MODE`), desde repositorio (`maintenance.json` antes de desplegar cambios) o en vivo desde el botón **Mantenimiento** exclusivo del Líder, sincronizado en tiempo real con `maintenance:updated` y manteniendo `GET /api/health` en `HTTP 200`.
 
 ---
 
@@ -122,6 +123,7 @@ El tablero administra **6 cupos fijos** (`slot` `1` al `6`):
 | Subir archivos adjuntos en tareas asignadas o compartidas | Sí | Sí | Sí |
 | Eliminar cualquier archivo adjunto | Sí | Solo propios | Solo propios |
 | Administrar cupos de **Equipo (6/6)** y restablecer contraseñas | Sí | No | No |
+| Activar/desactivar **Ventana de Mantenimiento** en vivo y operar durante mantenimiento | Sí | No | No |
 
 ---
 
@@ -157,7 +159,8 @@ proyecto_maestria/
 │   │   │   ├── common/             # ErrorBoundary
 │   │   │   ├── illustrations/      # Ilustraciones SVG propias
 │   │   │   ├── kanban/             # Board, Column, Card, Toolbar, Modales, OverdueAlert, ActivityDrawer
-│   │   │   ├── layout/             # TopHeader responsivo
+│   │   │   ├── layout/             # TopHeader responsivo (incluye botón Mantenimiento para Líder)
+│   │   │   ├── maintenance/        # MaintenanceScreen y MaintenanceModal
 │   │   │   ├── team/               # TeamModal (gestión 6/6)
 │   │   │   └── tutorial/           # OnboardingTutorialModal (4 pasos)
 │   │   ├── context/                # AuthContext y ThemeContext
@@ -167,21 +170,22 @@ proyecto_maestria/
 │   └── package.json
 ├── server/                         # Backend Express + Socket.IO + Prisma
 │   ├── prisma/
-│   │   ├── schema.prisma           # Modelos User, Task, Subtask, Comment, AttachmentBlob, TaskAttachment, ActivityLog
+│   │   ├── schema.prisma           # Modelos User, Task, Subtask, Comment, AttachmentBlob, TaskAttachment, ActivityLog, SystemConfig
 │   │   └── seed.ts                 # Seed idempotente (6 usuarios y datos de ejemplo)
-│   ├── scripts/                    # check-db.ts, google-oauth-setup.ts, test-auth.ts, test-realtime.ts, test-attachments.ts, test-prod.ts, test-security.ts
+│   ├── scripts/                    # check-db.ts, google-oauth-setup.ts, test-auth.ts, test-realtime.ts, test-attachments.ts, test-maintenance.ts, test-prod.ts, test-security.ts
 │   ├── src/
-│   │   ├── middleware/             # auth, errorHandler, rateLimit, security
+│   │   ├── middleware/             # auth, errorHandler, maintenance, rateLimit, security
 │   │   ├── realtime/               # Socket.IO server y event bus
-│   │   ├── routes/                 # auth, users, tasks, subtasks, attachments, activity, security, health
-│   │   ├── services/               # authService, taskService, attachmentService, googleAuthService, googleDriveService, mailService, securityService
+│   │   ├── routes/                 # auth, users, tasks, subtasks, attachments, activity, maintenance, security, health
+│   │   ├── services/               # authService, taskService, attachmentService, googleAuthService, googleDriveService, mailService, maintenanceService, securityService
 │   │   ├── utils/                  # errors, fileValidation, validation (Zod + rango de fechas)
-│   │   ├── app.ts                  # Express + Helmet + CORS + static SPA en producción
+│   │   ├── app.ts                  # Express + Helmet + CORS + guards de mantenimiento + static SPA en producción
 │   │   ├── config.ts               # Carga de variables de entorno y orígenes permitidos
 │   │   └── index.ts                # Arranque HTTP + apagado limpio
 │   └── package.json
 ├── docs/                           # Manuales (.docx/.pptx), video demo (.mp4) y screenshots/
-├── DESPLIEGUE_RENDER.md            # Guía paso a paso para Render + PostgreSQL
+├── maintenance.json                # Interruptor declarativo de ventana de mantenimiento (push-first)
+├── DESPLIEGUE_RENDER.md            # Guía paso a paso para Render + PostgreSQL y flujo de mantenimiento
 ├── render.yaml                     # Blueprint de despliegue en Render
 ├── package.json                    # Scripts orquestadores de raíz
 └── .env.example                    # Plantilla de variables de entorno
@@ -223,6 +227,7 @@ Copia [`server/.env.example`](./server/.env.example) a `server/.env` y completa 
 - `MAIL_NOTIFY_TO`: correo destinatario que recibe copia de cada archivo adjunto subido (tanto vía Gmail REST API como SMTP).
 - `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`: credenciales SMTP opcionales como respaldo local cuando no se configura Google OAuth 2.0.
 - `ATTACHMENTS_QUOTA_MB`: cuota global reservada para adjuntos en PostgreSQL en modo respaldo/legado DB (por defecto `512`).
+- `MAINTENANCE_MODE`: interruptor global por entorno (`"false"` por defecto; `"true"` fuerza la ventana de mantenimiento por encima de `maintenance.json` y BD). Opcionalmente admite `MAINTENANCE_TITLE`, `MAINTENANCE_MESSAGE` y `MAINTENANCE_ETA_MINUTES`.
 
 #### Generar `GOOGLE_REFRESH_TOKEN` localmente
 1. En Google Cloud Console habilita **Google Drive API** y **Gmail API**, y crea un cliente OAuth 2.0 tipo **App de escritorio** (recomendado; el callback loopback funciona automáticamente) o tipo **Aplicación web** registrando `http://127.0.0.1:48152/oauth2callback` como URI de redireccionamiento autorizada.
@@ -273,10 +278,11 @@ npm run dev:client
 | `npm --prefix server run db:seed` | Ejecuta `prisma/seed.ts` de forma idempotente |
 | `npm --prefix server run db:check` | Verifica usuarios, conteos de tareas y hash inicial en PostgreSQL |
 | `npm --prefix server run google:auth` | Asistente CLI OAuth 2.0 (`drive.file` + `gmail.send`) para obtener `GOOGLE_REFRESH_TOKEN` |
-| `npm --prefix server test` | Ejecuta la suite completa (`test:auth` + `test:realtime` + `test:attachments`) |
+| `npm --prefix server test` | Ejecuta la suite completa (`test:auth` + `test:realtime` + `test:attachments` + `test:maintenance`) |
 | `npm --prefix server run test:auth` | Valida autenticación, gestión de 6 cupos, roles, contraseñas y revocación JWT |
 | `npm --prefix server run test:realtime` | Valida Socket.IO, movimiento de tarjetas, subtareas, comentarios y permisos |
 | `npm --prefix server run test:attachments` | Valida modo Google Drive + Gmail HTTPS mockeados (Proxy JWT, `ETag` `304`, compensación) y retrocompatibilidad/fallback DB |
+| `npm --prefix server run test:maintenance` | Valida precedencia `env` > `file` > `database`, página HTML `503` CSP-safe, `/api/health` en `200`, bloqueo `503`/Socket.IO y control en vivo del Líder (`maintenance:updated`) |
 
 ---
 
@@ -285,6 +291,7 @@ npm run dev:client
 ### Endpoints principales
 
 - **Salud y Autenticación**: `GET /api/health`, `POST /api/auth/login`
+- **Ventana de Mantenimiento**: `GET /api/maintenance/status`, `PATCH /api/maintenance` (solo `LEADER`), `GET /maintenance-client.js`
 - **Perfil y Equipo**: `GET /api/users/me`, `PATCH /api/users/me`, `PATCH /api/users/me/password`, `GET /api/users`, `POST /api/users`, `PATCH /api/users/:id`, `DELETE /api/users/:id`
 - **Tareas, Subtareas y Comentarios**: `GET /api/tasks`, `GET /api/tasks/:id`, `POST /api/tasks`, `PATCH /api/tasks/:id`, `DELETE /api/tasks/:id`, `PATCH /api/tasks/:id/move`, `POST /api/tasks/:id/subtasks`, `PATCH /api/subtasks/:id`, `DELETE /api/subtasks/:id`, `GET /api/tasks/:id/comments`, `POST /api/tasks/:id/comments`, `DELETE /api/comments/:id`
 - **Archivos adjuntos y cuota DB**: `GET /api/tasks/:id/attachments`, `POST /api/tasks/:id/attachments`, `GET /api/attachments/:id/download`, `DELETE /api/attachments/:id`, `GET /api/attachments/storage`
@@ -293,7 +300,27 @@ npm run dev:client
 ### Eventos Socket.IO
 
 - **Cliente → Servidor**: `task:move` (con callback `ack`), `comment:typing`
-- **Servidor → Clientes**: `presence:update`, `task:created`, `task:updated`, `task:moved`, `task:approved`, `task:deleted`, `comment:created`, `comment:deleted`, `comment:typing`, `attachment:created`, `attachment:deleted`, `user:created`, `user:updated`, `user:deleted`, `activity:new`
+- **Servidor → Clientes**: `presence:update`, `task:created`, `task:updated`, `task:moved`, `task:approved`, `task:deleted`, `comment:created`, `comment:deleted`, `comment:typing`, `attachment:created`, `attachment:deleted`, `user:created`, `user:updated`, `user:deleted`, `activity:new`, `maintenance:updated`
+
+---
+
+## Ventana de Mantenimiento y regla operativa (Push-First)
+
+El proyecto incluye una **Ventana de Mantenimiento** pensada para proteger al equipo durante despliegues o cambios estructurales en Render sin mostrar caídas ni errores sueltos.
+
+### Regla operativa obligatoria antes de cada cambio
+Antes de editar o subir cambios grandes a `main`:
+
+1. **Activa [`maintenance.json`](./maintenance.json) y haz push primero:** cambia `"enabled": true` (con título, mensaje descriptivo y `estimatedMinutes`) y ejecuta `git push origin main` para que Render despliegue inmediatamente la página de mantenimiento en lugar de errores o caídas.
+2. **Desarrolla y prueba localmente:** implementa los cambios, compila (`npm run build`) y ejecuta las pruebas locales (`npm --prefix server test` / `npm --prefix server run test:maintenance`).
+3. **Restaura [`maintenance.json`](./maintenance.json) en el push final:** vuelve a dejar `"enabled": false` antes de hacer el `git push origin main` definitivo con la nueva versión verificada.
+
+### Los 3 controles y su precedencia
+1. **`MAINTENANCE_MODE` en Render (`source: "env"`):** interruptor de emergencia en variables de entorno (`MAINTENANCE_MODE="true"`, con opcionales `MAINTENANCE_TITLE`, `MAINTENANCE_MESSAGE`, `MAINTENANCE_ETA_MINUTES`). Tiene máxima prioridad y no puede desactivarse desde la app.
+2. **`maintenance.json` por push (`source: "file"`):** interruptor declarativo en la raíz del repositorio para el flujo *push-first*. Tiene prioridad sobre la base de datos.
+3. **Botón en vivo `Mantenimiento` en el header del Líder (`source: "database"`):** permite al `LEADER` activar, editar o finalizar el mantenimiento al instante mediante `PATCH /api/maintenance`, guardando el estado en `SystemConfig` (PostgreSQL) y notificando a todo el equipo en tiempo real con el evento Socket.IO `maintenance:updated`.
+
+Mientras el mantenimiento esté activo, `GET /api/health` continúa respondiendo **HTTP `200`** (`{ status: "ok", db: true, maintenance: true }`), el navegador recibe una página **HTTP `503`** CSP-safe (`/maintenance-client.js` con auto-recarga cada 10s y acordeón discreto **Acceso exclusivo Líder**), y el **`LEADER`** conserva acceso completo tanto por REST como por Socket.IO (`GET /api/maintenance/status` expone el estado vigente para clientes).
 
 ---
 

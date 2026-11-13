@@ -7,6 +7,12 @@ import express from 'express';
 import helmet from 'helmet';
 import { config, isOriginAllowed } from './config';
 import { apiNotFoundHandler, errorHandler } from './middleware/errorHandler';
+import {
+  apiMaintenanceGuard,
+  sendMaintenanceHtmlResponse,
+  serveMaintenanceClientScript,
+  webMaintenanceGuard,
+} from './middleware/maintenance';
 import { globalApiLimiter, mutationApiLimiter } from './middleware/rateLimit';
 import { sanitizeInputMiddleware, securityHeadersMiddleware } from './middleware/security';
 import { attachmentsRouter } from './routes/attachments';
@@ -14,6 +20,7 @@ import { setupSocketIO } from './realtime/socket';
 import { activityRouter } from './routes/activity';
 import { authRouter } from './routes/auth';
 import { healthRouter } from './routes/health';
+import { maintenanceRouter } from './routes/maintenance';
 import { securityRouter } from './routes/security';
 import { commentsRouter, subtasksRouter } from './routes/subtasks';
 import { tasksRouter } from './routes/tasks';
@@ -90,9 +97,13 @@ export function createServer() {
   app.use(express.json({ limit: '100kb' }));
   app.use(sanitizeInputMiddleware);
 
+  app.get('/maintenance-client.js', serveMaintenanceClientScript);
+
   app.use('/api', globalApiLimiter, mutationApiLimiter);
   app.use('/api/health', healthRouter);
+  app.use('/api/maintenance', maintenanceRouter);
   app.use('/api/auth', authRouter);
+  app.use('/api', apiMaintenanceGuard);
   app.use('/api/users', usersRouter);
   app.use('/api/tasks', tasksRouter);
   app.use('/api/subtasks', subtasksRouter);
@@ -102,6 +113,8 @@ export function createServer() {
   app.use('/api/security', securityRouter);
 
   app.use('/api', apiNotFoundHandler);
+
+  app.use(webMaintenanceGuard);
 
   if (config.isProd) {
     const clientDistDir = resolveClientDistDir();
@@ -120,7 +133,11 @@ export function createServer() {
       );
 
       app.get('*', (req, res, next) => {
-        if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
+        if (
+          req.path.startsWith('/api') ||
+          req.path.startsWith('/socket.io') ||
+          req.path === '/maintenance-client.js'
+        ) {
           next();
           return;
         }
@@ -129,6 +146,27 @@ export function createServer() {
       });
     } else {
       console.warn('[tablero-kanban-server] Advertencia: no se encontró client/dist en modo producción.');
+      app.get('*', (req, res, next) => {
+        if (
+          req.path.startsWith('/api') ||
+          req.path.startsWith('/socket.io') ||
+          req.path === '/maintenance-client.js'
+        ) {
+          next();
+          return;
+        }
+        sendMaintenanceHtmlResponse(res, {
+          active: true,
+          source: 'file',
+          canDisableInApp: false,
+          title: 'Actualizando el Tablero Kanban',
+          message:
+            'Estamos terminando de compilar una actualización. Esta página se recargará automáticamente en unos segundos.',
+          estimatedMinutes: 2,
+          updatedByName: null,
+          updatedAt: new Date().toISOString(),
+        });
+      });
     }
   }
 

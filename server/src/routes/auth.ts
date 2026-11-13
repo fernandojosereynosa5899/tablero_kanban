@@ -8,6 +8,7 @@ import {
 } from '../middleware/rateLimit';
 import { prisma } from '../prisma';
 import { signAuthToken, verifyDummyPassword, verifyPassword } from '../services/authService';
+import { getMaintenanceStatus } from '../services/maintenanceService';
 import { recordSecurityEvent } from '../services/securityService';
 import { toUserPublic } from '../types/domain';
 import { loginSchema, normalizeUsername } from '../utils/validation';
@@ -54,6 +55,18 @@ authRouter.post('/login', loginIpLimiter, async (req, res, next) => {
     }
 
     clearFailedLoginAttempts(ip, normalized);
+
+    const maintenance = await getMaintenanceStatus();
+    if (maintenance.active && user.role !== 'LEADER') {
+      res.setHeader('Retry-After', '30');
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(503).json({
+        error: maintenance.message,
+        maintenance: true,
+        status: maintenance,
+      });
+      return;
+    }
 
     await prisma.activityLog.create({
       data: {

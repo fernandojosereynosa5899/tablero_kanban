@@ -1,5 +1,5 @@
 import type { TaskStatus } from '@prisma/client';
-import type { Activity, Comment, Task, TaskAttachment, UserPublic } from '../types/domain';
+import type { Activity, Comment, MaintenanceStatus, Task, TaskAttachment, UserPublic } from '../types/domain';
 
 export type UserRealtimeEventName = 'user:created' | 'user:updated' | 'user:deleted';
 
@@ -20,6 +20,7 @@ export type RealtimePayloadMap = UserRealtimePayloadMap & {
   'attachment:created': { taskId: string; attachment: TaskAttachment };
   'attachment:deleted': { taskId: string; id: string };
   'activity:new': Activity;
+  'maintenance:updated': MaintenanceStatus;
 };
 
 export type RealtimeEventName = keyof RealtimePayloadMap;
