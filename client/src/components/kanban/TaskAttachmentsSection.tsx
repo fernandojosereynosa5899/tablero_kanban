@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import {
+  Cloud,
   Download,
   Eye,
   File,
@@ -124,9 +125,39 @@ export function TaskAttachmentsSection({
     setPreviewModal(null);
   };
 
-  const quotaPct = storageStats && storageStats.quotaBytes > 0
-    ? Math.min(100, Math.round((storageStats.storedBytes / storageStats.quotaBytes) * 100))
+  const isDriveMode = storageStats?.storageMode === 'gdrive';
+  const dbUsedBytes = storageStats
+    ? (storageStats.usedBytes ?? storageStats.storedBytes ?? 0)
     : 0;
+  const quotaPct =
+    storageStats && storageStats.quotaBytes > 0
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            Math.round((storageStats.usageRatio ?? dbUsedBytes / storageStats.quotaBytes) * 100),
+          ),
+        )
+      : 0;
+  const hasDriveQuota =
+    isDriveMode &&
+    storageStats.driveUsedBytes != null &&
+    storageStats.driveQuotaBytes != null;
+  const driveQuotaPct =
+    hasDriveQuota && (storageStats.driveQuotaBytes ?? 0) > 0
+      ? Math.min(
+          100,
+          Math.max(
+            0,
+            Math.round(
+              (storageStats.driveUsageRatio ??
+                (storageStats.driveUsedBytes as number) /
+                  (storageStats.driveQuotaBytes as number)) *
+                100,
+            ),
+          ),
+        )
+      : null;
 
   const limitReached = attachments.length >= MAX_ATTACHMENTS_PER_TASK;
 
@@ -165,25 +196,41 @@ export function TaskAttachmentsSection({
       onAttachmentAdded(response.attachment);
       onStorageStatsRefresh();
 
+      const storageProvider =
+        response.storageProvider ?? response.attachment.storageProvider;
+      const storedInDrive = storageProvider === 'gdrive';
+      const storageLabel = storedInDrive ? 'Google Drive' : 'DB';
+
       const notes: string[] = [];
       if (optimized.wasOptimized && optimized.savedBytes > 0) {
         notes.push(`optimizado (-${formatBytes(optimized.savedBytes)})`);
       }
-      if (response.deduplicated) {
-        notes.push('deduplicado en DB (0 B extra)');
-      } else if (response.attachment.isCompressed) {
-        notes.push(
-          `comprimido gzip (${formatBytes(response.attachment.storedBytes)})`
-        );
+      if (!storedInDrive) {
+        if (response.deduplicated) {
+          notes.push('deduplicado en DB (0 B extra)');
+        } else if (response.attachment.isCompressed) {
+          notes.push(
+            `comprimido gzip (${formatBytes(response.attachment.storedBytes)})`
+          );
+        }
       }
 
       const suffix = notes.length > 0 ? ` · ${notes.join(', ')}` : '';
       if (response.emailSent) {
-        toast.success(`Archivo subido y enviado por correo al líder${suffix}`);
+        const emailProviderLabel =
+          response.emailProvider === 'gmail_api'
+            ? 'Gmail HTTPS'
+            : response.emailProvider === 'smtp'
+              ? 'SMTP'
+              : 'correo';
+        toast.success(
+          `Archivo guardado en ${storageLabel} y enviado al líder por ${emailProviderLabel}${suffix}`
+        );
       } else {
-        toast.success(`Archivo subido correctamente${suffix}`);
-        if (response.emailWarning) {
-          toast.warning(`Aviso de correo: ${response.emailWarning}`);
+        toast.success(`Archivo guardado en ${storageLabel}${suffix}`);
+        const emailAlert = response.emailWarning ?? response.emailError;
+        if (emailAlert) {
+          toast.warning(`Aviso de correo: ${emailAlert}`);
         }
       }
     } catch (err) {
@@ -261,7 +308,11 @@ export function TaskAttachmentsSection({
         res.removedBlob && res.freedBytes > 0
           ? ` (${formatBytes(res.freedBytes)} liberados de la DB)`
           : '';
-      toast.success(`Archivo eliminado${freedText}`);
+      if (res.removedFromDrive) {
+        toast.success(`Archivo eliminado de Google Drive y del tablero${freedText}`);
+      } else {
+        toast.success(`Archivo eliminado${freedText}`);
+      }
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'No se pudo eliminar el archivo';
       toast.error(msg);
@@ -281,21 +332,51 @@ export function TaskAttachmentsSection({
         </div>
 
         {storageStats ? (
-          <div
-            title={`Uso real en DB: ${formatBytes(storageStats.storedBytes)} de ${formatBytes(storageStats.quotaBytes)} (${storageStats.uniqueBlobs} bloques únicos). Ahorro acumulado por dedup/gzip: ${formatBytes(storageStats.savedBytes)}`}
-            className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-          >
-            <HardDrive className="h-3.5 w-3.5 text-slate-500" />
-            <span>
-              DB: <strong className="font-semibold">{formatBytes(storageStats.storedBytes)}</strong> /{' '}
-              {formatBytes(storageStats.quotaBytes)} ({quotaPct}%)
-            </span>
-            {storageStats.savedBytes > 0 ? (
-              <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
-                -{formatBytes(storageStats.savedBytes)} ahorrados
+          isDriveMode ? (
+            <div
+              title={
+                hasDriveQuota
+                  ? `Almacenamiento privado en Google Drive: ${formatBytes(storageStats.driveUsedBytes!)} de ${formatBytes(storageStats.driveQuotaBytes!)} (${storageStats.driveAttachments} archivo(s) en Drive, ${formatBytes(storageStats.driveLogicalBytes)}). Uso en PostgreSQL: ${formatBytes(dbUsedBytes)} (${storageStats.dbAttachments} legado, ${storageStats.uniqueBlobs} bloques).`
+                  : `Almacenamiento privado en Google Drive (${storageStats.driveAttachments} archivo(s) en Drive, ${formatBytes(storageStats.driveLogicalBytes)}). Uso en PostgreSQL: ${formatBytes(dbUsedBytes)} (${storageStats.dbAttachments} legado, ${storageStats.uniqueBlobs} bloques).`
+              }
+              className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+            >
+              <Cloud className="h-3.5 w-3.5 text-sky-600 dark:text-sky-400" />
+              {hasDriveQuota ? (
+                <span>
+                  Drive:{' '}
+                  <strong className="font-semibold text-slate-800 dark:text-slate-100">
+                    {formatBytes(storageStats.driveUsedBytes!)}
+                  </strong>{' '}
+                  / {formatBytes(storageStats.driveQuotaBytes!)}
+                  {driveQuotaPct !== null ? ` (${driveQuotaPct}%)` : ''}
+                </span>
+              ) : (
+                <span className="font-semibold text-slate-700 dark:text-slate-200">
+                  Google Drive privado
+                </span>
+              )}
+              <span className="rounded bg-teal-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
+                {dbUsedBytes === 0 ? '0 B en DB' : `${formatBytes(dbUsedBytes)} DB legado`}
               </span>
-            ) : null}
-          </div>
+            </div>
+          ) : (
+            <div
+              title={`Uso real en DB: ${formatBytes(dbUsedBytes)} de ${formatBytes(storageStats.quotaBytes)} (${storageStats.uniqueBlobs} bloques únicos). Ahorro acumulado por dedup/gzip: ${formatBytes(storageStats.savedBytes)}`}
+              className="inline-flex flex-wrap items-center gap-1.5 rounded-lg bg-slate-100 px-2 py-1 text-[11px] font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
+            >
+              <HardDrive className="h-3.5 w-3.5 text-slate-500" />
+              <span>
+                DB: <strong className="font-semibold">{formatBytes(dbUsedBytes)}</strong> /{' '}
+                {formatBytes(storageStats.quotaBytes)} ({quotaPct}%)
+              </span>
+              {storageStats.savedBytes > 0 ? (
+                <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700 dark:text-emerald-300">
+                  -{formatBytes(storageStats.savedBytes)} ahorrados
+                </span>
+              ) : null}
+            </div>
+          )
         ) : null}
       </div>
 
@@ -335,7 +416,9 @@ export function TaskAttachmentsSection({
               </p>
               <p className="inline-flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400">
                 <MailCheck className="h-3 w-3 shrink-0" />
-                Optimización automática + respaldo por correo al líder
+                {isDriveMode
+                  ? 'Almacenamiento privado en Google Drive + envío automático por Gmail HTTPS'
+                  : 'Optimización automática + respaldo por correo al líder'}
               </p>
             </div>
 
@@ -405,11 +488,15 @@ export function TaskAttachmentsSection({
                     <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-slate-500 dark:text-slate-400">
                       <span className="font-mono uppercase">{att.extension.replace('.', '')}</span>
                       <span>· {formatBytes(att.sizeBytes)}</span>
-                      {att.isCompressed && att.storedBytes < att.sizeBytes ? (
-                        <span className="rounded bg-emerald-500/10 px-1 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
+                      {att.storageProvider === 'gdrive' ? (
+                        <span className="inline-flex items-center gap-1 rounded bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-medium text-sky-700 dark:bg-sky-500/20 dark:text-sky-300">
+                          Google Drive · 0 B DB
+                        </span>
+                      ) : (
+                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:text-emerald-300">
                           {formatBytes(att.storedBytes)} DB
                         </span>
-                      ) : null}
+                      )}
                       <span>
                         · por <strong className="font-medium text-slate-700 dark:text-slate-200">{att.uploadedBy?.displayName ?? 'Usuario'}</strong>
                       </span>

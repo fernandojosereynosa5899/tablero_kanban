@@ -66,6 +66,7 @@ model Task {
   createdById   String?
   createdBy     User?      @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
   approvedAt  DateTime?
+  driveFolderId String?
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
@@ -115,21 +116,26 @@ model AttachmentBlob {
 }
 
 model TaskAttachment {
-  id           String         @id @default(cuid())
-  taskId       String
-  task         Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
-  uploadedById String?
-  uploadedBy   User?          @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
-  blobSha256   String
-  blob         AttachmentBlob @relation(fields: [blobSha256], references: [sha256], onDelete: Restrict)
-  originalName String
-  extension    String
-  mimeType     String
-  sizeBytes    Int
-  createdAt    DateTime       @default(now())
+  id              String          @id @default(cuid())
+  taskId          String
+  task            Task            @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploadedById    String?
+  uploadedBy      User?           @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  storageProvider String          @default("db")
+  driveFileId     String?
+  driveFolderId   String?
+  contentSha256   String?
+  blobSha256      String?
+  blob            AttachmentBlob? @relation(fields: [blobSha256], references: [sha256], onDelete: Restrict)
+  originalName    String
+  extension       String
+  mimeType        String
+  sizeBytes       Int
+  createdAt       DateTime        @default(now())
 
   @@index([taskId, createdAt])
   @@index([blobSha256])
+  @@index([driveFileId])
 }
 
 model ActivityLog {

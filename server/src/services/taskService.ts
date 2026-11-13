@@ -4,6 +4,11 @@ import { emitEvent } from '../realtime/bus';
 import { buildForbiddenMessage, recordSecurityEvent } from './securityService';
 import { attachmentMetaInclude, cleanupOrphanBlobs } from './attachmentService';
 import {
+  deleteAttachmentFromDrive,
+  deleteTaskDriveFolder,
+  isGoogleDriveEnabled,
+} from './googleDriveService';
+import {
   type Activity,
   type Comment,
   type Task,
@@ -236,10 +241,10 @@ export async function updateTask(actor: User, id: string, input: UpdateTaskInput
 }
 
 export async function deleteTask(actor: User, id: string): Promise<{ ok: true; id: string }> {
-  const activity = await prisma.$transaction(async (tx) => {
+  const { activity, driveFileIds, driveFolderId } = await prisma.$transaction(async (tx) => {
     const existing = await tx.task.findUnique({
       where: { id },
-      select: { id: true, title: true },
+      select: { id: true, title: true, driveFolderId: true },
     });
     if (!existing) {
       throw new HttpError(404, 'Tarea no encontrada');
@@ -247,17 +252,19 @@ export async function deleteTask(actor: User, id: string): Promise<{ ok: true; i
 
     const attachedRows = await tx.taskAttachment.findMany({
       where: { taskId: id },
-      select: { blobSha256: true },
+      select: { blobSha256: true, storageProvider: true, driveFileId: true },
     });
 
     await tx.task.delete({ where: { id } });
 
     await cleanupOrphanBlobs(
       tx,
-      attachedRows.map((row) => row.blobSha256)
+      attachedRows
+        .map((row) => row.blobSha256)
+        .filter((sha): sha is string => Boolean(sha))
     );
 
-    return tx.activityLog.create({
+    const log = await tx.activityLog.create({
       data: {
         userId: actor.id,
         taskId: null,
@@ -269,7 +276,29 @@ export async function deleteTask(actor: User, id: string): Promise<{ ok: true; i
       },
       include: { user: true },
     });
+
+    const fileIds = attachedRows
+      .filter((row) => row.storageProvider === 'gdrive' && Boolean(row.driveFileId))
+      .map((row) => row.driveFileId as string);
+
+    return {
+      activity: log,
+      driveFileIds: fileIds,
+      driveFolderId: existing.driveFolderId,
+    };
   });
+
+  if (isGoogleDriveEnabled() && (driveFileIds.length > 0 || driveFolderId)) {
+    const uniqueFileIds = [...new Set(driveFileIds)];
+    if (uniqueFileIds.length > 0) {
+      await Promise.allSettled(
+        uniqueFileIds.map((fileId) => deleteAttachmentFromDrive(fileId))
+      );
+    }
+    if (driveFolderId) {
+      await Promise.allSettled([deleteTaskDriveFolder(driveFolderId)]);
+    }
+  }
 
   emitEvent('task:deleted', { id });
   emitEvent('activity:new', toActivityDTO(activity));

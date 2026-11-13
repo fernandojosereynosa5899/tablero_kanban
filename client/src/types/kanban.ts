@@ -109,6 +109,8 @@ export interface Task {
   attachmentCount: number;
 }
 
+export type AttachmentStorageProvider = 'gdrive' | 'db';
+
 export interface TaskAttachment {
   id: string;
   taskId: string;
@@ -119,7 +121,9 @@ export interface TaskAttachment {
   storedBytes: number;
   isCompressed: boolean;
   isPreviewableImage: boolean;
-  blobSha256: string;
+  storageProvider: AttachmentStorageProvider;
+  contentSha256: string;
+  blobSha256: string | null;
   createdAt: string;
   uploadedBy: UserPublic | null;
 }
@@ -127,17 +131,29 @@ export interface TaskAttachment {
 export interface AttachmentUploadResponse {
   attachment: TaskAttachment;
   deduplicated: boolean;
+  storageProvider: AttachmentStorageProvider;
   emailSent: boolean;
+  emailProvider?: 'gmail_api' | 'smtp';
   emailWarning?: string;
+  emailError?: string;
 }
 
 export interface AttachmentStorageStats {
+  storageMode: AttachmentStorageProvider;
+  usedBytes: number;
+  storedBytes?: number;
   logicalBytes: number;
-  storedBytes: number;
-  savedBytes: number;
-  quotaBytes: number;
   uniqueBlobs: number;
   totalAttachments: number;
+  driveAttachments: number;
+  driveLogicalBytes: number;
+  dbAttachments: number;
+  savedBytes: number;
+  quotaBytes: number;
+  usageRatio: number;
+  driveQuotaBytes: number | null;
+  driveUsedBytes: number | null;
+  driveUsageRatio: number | null;
 }
 
 export interface Comment {

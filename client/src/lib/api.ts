@@ -318,13 +318,21 @@ export const api = {
 
   deleteTaskAttachment(
     attachmentId: string,
-  ): Promise<{ ok: boolean; id: string; taskId: string; removedBlob: boolean; freedBytes: number }> {
+  ): Promise<{
+    ok: boolean;
+    id: string;
+    taskId: string;
+    removedBlob: boolean;
+    freedBytes: number;
+    removedFromDrive?: boolean;
+  }> {
     return request<{
       ok: boolean;
       id: string;
       taskId: string;
       removedBlob: boolean;
       freedBytes: number;
+      removedFromDrive?: boolean;
     }>(`/api/attachments/${encodeURIComponent(attachmentId)}`, {
       method: 'DELETE',
     });

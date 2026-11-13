@@ -1,14 +1,22 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import { io as createSocketClient, type Socket } from 'socket.io-client';
 import { createServer } from '../src/app';
 import { prisma } from '../src/prisma';
 import {
+  type DriveQuotaInfo,
+  type DriveUploadInput,
+  type DriveUploadResult,
+  type GoogleDriveAdapter,
+  setGoogleDriveAdapterForTests,
+} from '../src/services/googleDriveService';
+import {
   type AttachmentEmailPayload,
   setMailDispatcherForTests,
+  verifyMailConnection,
   verifySmtpConnection,
 } from '../src/services/mailService';
-import { getTestUserPassword } from './lib/testCredentials';
 import type {
   AttachmentStorageStats,
   AttachmentUploadResponse,
@@ -16,11 +24,168 @@ import type {
   TaskAttachment,
   TaskDetail,
 } from '../src/types/domain';
+import { HttpError } from '../src/utils/errors';
+import { getTestUserPassword } from './lib/testCredentials';
 
 interface HttpResult<T = unknown> {
   status: number;
   headers: Headers;
   data: T;
+}
+
+interface DeleteAttachmentResponse {
+  ok: boolean;
+  id: string;
+  taskId: string;
+  removedBlob: boolean;
+  freedBytes: number;
+  removedFromDrive?: boolean;
+}
+
+interface MockDriveFileRecord {
+  fileId: string;
+  folderId: string;
+  taskId: string;
+  originalName: string;
+  mimeType: string;
+  buffer: Buffer;
+  webViewLink: string;
+}
+
+interface MockDriveFolderRecord {
+  folderId: string;
+  taskId: string;
+  name: string;
+}
+
+interface InMemoryDriveState {
+  driveFiles: Map<string, MockDriveFileRecord>;
+  driveFolders: Map<string, MockDriveFolderRecord>;
+  taskFolderMap: Map<string, string>;
+  deletedFiles: string[];
+  deletedFolders: string[];
+  knownFolderIdsReceived: Array<string | null | undefined>;
+  downloadCalls: number;
+  onBeforeUpload?: (input: DriveUploadInput) => Promise<void>;
+  adapter: GoogleDriveAdapter;
+}
+
+const DRIVE_QUOTA_BYTES = 15 * 1024 * 1024 * 1024; // 15 GB simulados
+
+function sha256Hex(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
+function createInMemoryDriveState(): InMemoryDriveState {
+  const driveFiles = new Map<string, MockDriveFileRecord>();
+  const driveFolders = new Map<string, MockDriveFolderRecord>();
+  const taskFolderMap = new Map<string, string>();
+  const deletedFiles: string[] = [];
+  const deletedFolders: string[] = [];
+  const knownFolderIdsReceived: Array<string | null | undefined> = [];
+  let folderSeq = 0;
+  let fileSeq = 0;
+
+  const state: InMemoryDriveState = {
+    driveFiles,
+    driveFolders,
+    taskFolderMap,
+    deletedFiles,
+    deletedFolders,
+    knownFolderIdsReceived,
+    downloadCalls: 0,
+    adapter: {
+      isEnabled: () => true,
+
+      uploadFile: async (input: DriveUploadInput): Promise<DriveUploadResult> => {
+        if (state.onBeforeUpload) {
+          await state.onBeforeUpload(input);
+        }
+
+        knownFolderIdsReceived.push(input.knownFolderId);
+
+        let folderId =
+          input.knownFolderId && driveFolders.has(input.knownFolderId)
+            ? input.knownFolderId
+            : undefined;
+
+        if (!folderId) {
+          const mappedFolderId = taskFolderMap.get(input.taskId);
+          if (mappedFolderId && driveFolders.has(mappedFolderId)) {
+            folderId = mappedFolderId;
+          }
+        }
+
+        if (!folderId) {
+          folderId = `drv_folder_${++folderSeq}`;
+          driveFolders.set(folderId, {
+            folderId,
+            taskId: input.taskId,
+            name: `${input.taskTitle} (${input.taskId.slice(-6)})`,
+          });
+          taskFolderMap.set(input.taskId, folderId);
+        }
+
+        const fileId = `drv_file_${++fileSeq}`;
+        const webViewLink = `https://drive.google.com/file/d/${fileId}/view`;
+        driveFiles.set(fileId, {
+          fileId,
+          folderId,
+          taskId: input.taskId,
+          originalName: input.originalName,
+          mimeType: input.mimeType,
+          buffer: Buffer.from(input.buffer),
+          webViewLink,
+        });
+
+        return {
+          fileId,
+          folderId,
+          webViewLink,
+          sizeBytes: input.buffer.length,
+        };
+      },
+
+      downloadFile: async (fileId: string): Promise<Buffer> => {
+        state.downloadCalls += 1;
+        const record = driveFiles.get(fileId);
+        if (!record) {
+          throw new HttpError(404, 'El archivo ya no está disponible en Google Drive');
+        }
+        return Buffer.from(record.buffer);
+      },
+
+      deleteFile: async (fileId: string): Promise<void> => {
+        deletedFiles.push(fileId);
+        driveFiles.delete(fileId);
+      },
+
+      deleteFolder: async (folderId: string): Promise<void> => {
+        deletedFolders.push(folderId);
+        driveFolders.delete(folderId);
+        for (const [taskId, mapped] of taskFolderMap.entries()) {
+          if (mapped === folderId) {
+            taskFolderMap.delete(taskId);
+          }
+        }
+      },
+
+      getStorageQuota: async (): Promise<DriveQuotaInfo> => {
+        let usage = 0;
+        for (const record of driveFiles.values()) {
+          usage += record.buffer.length;
+        }
+        return {
+          limitBytes: DRIVE_QUOTA_BYTES,
+          usageBytes: usage,
+          usageInDriveBytes: usage,
+          userEmail: 'kanban-drive-test@example.com',
+        };
+      },
+    },
+  };
+
+  return state;
 }
 
 async function requestJson<T = unknown>(
@@ -79,6 +244,46 @@ async function login(baseUrl: string, username: string, password: string) {
   return { token: res.data.token, userId: res.data.user.id, displayName: res.data.user.displayName };
 }
 
+async function createTempTask(
+  baseUrl: string,
+  token: string,
+  title: string,
+  assigneeId: string,
+  tempTaskIds: string[]
+): Promise<string> {
+  const res = await requestJson<Task>(baseUrl, '/api/tasks', {
+    method: 'POST',
+    token,
+    body: {
+      title,
+      description: `Descripción temporal para ${title}`,
+      assigneeId,
+      priority: 'MEDIUM',
+      dueDate: '2026-11-28T12:00:00.000Z',
+      status: 'TODO',
+      subtasks: [`Subtarea ${title}`],
+    },
+  });
+  assert.equal(res.status, 201, `No se pudo crear tarea temporal ${title}`);
+  tempTaskIds.push(res.data.id);
+  return res.data.id;
+}
+
+async function deleteTempTask(
+  baseUrl: string,
+  token: string,
+  taskId: string,
+  tempTaskIds: string[]
+): Promise<void> {
+  const res = await requestJson<{ ok: boolean }>(baseUrl, `/api/tasks/${taskId}`, {
+    method: 'DELETE',
+    token,
+  });
+  assert.equal(res.status, 200, `No se pudo eliminar tarea temporal ${taskId}`);
+  const idx = tempTaskIds.indexOf(taskId);
+  if (idx >= 0) tempTaskIds.splice(idx, 1);
+}
+
 function connectSocket(baseUrl: string, token: string): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const socket = createSocketClient(baseUrl, {
@@ -125,8 +330,36 @@ function waitForEvent<T = unknown>(
   });
 }
 
+function assertNoDriveSecretsExposed(
+  payload: unknown,
+  internalDriveIds: string[],
+  context: string
+): void {
+  const serialized = JSON.stringify(payload);
+  assert.ok(!serialized.includes('"driveFileId"'), `${context}: no debe exponer driveFileId`);
+  assert.ok(!serialized.includes('"driveFolderId"'), `${context}: no debe exponer driveFolderId`);
+  assert.ok(
+    !serialized.includes('"driveWebViewLink"'),
+    `${context}: no debe exponer driveWebViewLink`
+  );
+  assert.ok(
+    !serialized.includes('drive.google.com'),
+    `${context}: no debe exponer enlaces directos de Google Drive`
+  );
+  for (const id of internalDriveIds) {
+    if (id) {
+      assert.ok(
+        !serialized.includes(id),
+        `${context}: no debe filtrar ID interno de Drive (${id})`
+      );
+    }
+  }
+}
+
 function createSamplePdf(repetitions = 120): Buffer {
-  const repeatedText = 'Resumen academico Kanban maestria optimizacion almacenamiento '.repeat(repetitions);
+  const repeatedText = 'Resumen academico Kanban maestria optimizacion almacenamiento '.repeat(
+    repetitions
+  );
   return Buffer.from(
     `%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n% ${repeatedText}\n%%EOF\n`,
     'utf8'
@@ -141,14 +374,15 @@ function createBomPrefixedPdf(): Buffer {
 }
 
 function createMinimalOoxml(markerDir: 'word/' | 'ppt/' | 'xl/'): Buffer {
-  // Cabecera ZIP PK\x03\x04 + nombres internos OOXML requeridos para validación de firma binaria
   const header = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00]);
-  const body = Buffer.from(`[Content_Types].xml\0${markerDir}document.xml\0contenido_ooxml_test`, 'utf8');
+  const body = Buffer.from(
+    `[Content_Types].xml\0${markerDir}document.xml\0contenido_ooxml_test`,
+    'utf8'
+  );
   return Buffer.concat([header, body]);
 }
 
 function createMinimalPng(): Buffer {
-  // PNG 1x1 píxel transparente válido
   return Buffer.from(
     '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c63000100000500010d0a2db40000000049454e44ae426082',
     'hex'
@@ -162,12 +396,19 @@ function createMinimalJpg(): Buffer {
 async function main(): Promise<void> {
   const startedAt = new Date();
   const initialBlobCount = await prisma.attachmentBlob.count();
+  const initialBlobAgg = await prisma.attachmentBlob.aggregate({
+    _sum: { storedBytes: true },
+  });
+  const initialDbUsedBytes = initialBlobAgg._sum.storedBytes ?? 0;
   const initialAttachmentCount = await prisma.taskAttachment.count();
-  const sentEmails: AttachmentEmailPayload[] = [];
 
+  const sentEmails: AttachmentEmailPayload[] = [];
+  const driveState = createInMemoryDriveState();
+
+  setGoogleDriveAdapterForTests(driveState.adapter);
   setMailDispatcherForTests(async (payload) => {
     sentEmails.push(payload);
-    return { sent: true };
+    return { sent: true, provider: 'gmail_api' };
   });
 
   const { httpServer, io } = createServer();
@@ -200,42 +441,34 @@ async function main(): Promise<void> {
     const liderSocket = await connectSocket(baseUrl, lider.token);
     sockets.push(liderSocket);
 
-    // 1. Crear 2 tareas temporales: tarea A asignada a integrante1, tarea B asignada a integrante2
-    const tARes = await requestJson<Task>(baseUrl, '/api/tasks', {
-      method: 'POST',
-      token: lider.token,
-      body: {
-        title: '__TEST__ Adjuntos Tarea A',
-        description: 'Tarea temporal A para validar archivos adjuntos',
-        assigneeId: m1.userId,
-        priority: 'MEDIUM',
-        dueDate: '2026-11-28T12:00:00.000Z',
-        status: 'TODO',
-        subtasks: ['Subtarea adjunto A'],
-      },
-    });
-    assert.equal(tARes.status, 201);
-    const taskAId = tARes.data.id;
-    tempTaskIds.push(taskAId);
+    const pdfBuffer = createSamplePdf();
+    const pptxBuffer = createMinimalOoxml('ppt/');
+    const docxBuffer = createMinimalOoxml('word/');
+    const pngBuffer = createMinimalPng();
+    const jpgBuffer = createMinimalJpg();
+    const bomPdfBuffer = createBomPrefixedPdf();
 
-    const tBRes = await requestJson<Task>(baseUrl, '/api/tasks', {
-      method: 'POST',
-      token: lider.token,
-      body: {
-        title: '__TEST__ Adjuntos Tarea B',
-        description: 'Tarea temporal B para validar RBAC de adjuntos',
-        assigneeId: m2.userId,
-        priority: 'LOW',
-        dueDate: '2026-11-28T12:00:00.000Z',
-        status: 'TODO',
-        subtasks: ['Subtarea adjunto B'],
-      },
-    });
-    assert.equal(tBRes.status, 201);
-    const taskBId = tBRes.data.id;
-    tempTaskIds.push(taskBId);
+    // =========================================================================
+    // BLOQUE 1 — Modo Google Drive Privado + Gmail HTTPS mockeado
+    // =========================================================================
+    console.log('\n[test:attachments] Bloque 1: Google Drive Privado + Gmail REST API HTTPS');
 
-    // 2. Validar rechazo de formatos no permitidos (.svg, .exe) y firmas falsificadas (.pdf con MZ, .pptx genérico sin ppt/)
+    const taskAId = await createTempTask(
+      baseUrl,
+      lider.token,
+      '__TEST__ Drive Adjuntos Tarea A',
+      m1.userId,
+      tempTaskIds
+    );
+    const taskBId = await createTempTask(
+      baseUrl,
+      lider.token,
+      '__TEST__ Drive Adjuntos Tarea B',
+      m2.userId,
+      tempTaskIds
+    );
+
+    // 1.1 Validación de formatos, firmas binarias, tamaño máximo y RBAC
     const badSvg = await uploadMultipart(
       baseUrl,
       `/api/tasks/${taskAId}/attachments`,
@@ -268,16 +501,6 @@ async function main(): Promise<void> {
       'application/pdf',
       Buffer.concat([Buffer.from('%PDF-1.4\n'), Buffer.alloc(5 * 1024 * 1024 + 512, 0x41)])
     );
-
-    check('Rechaza .svg, PDF falsificado, PPTX sin firma OOXML y archivos > 5 MB con HTTP 400', () => {
-      assert.equal(badSvg.status, 400);
-      assert.equal(spoofedPdf.status, 400);
-      assert.equal(spoofedPptx.status, 400);
-      assert.equal(tooLarge.status, 400);
-    });
-
-    // 3. RBAC: integrante2 no puede subir en tarea asignada únicamente a integrante1
-    const pdfBuffer = createSamplePdf();
     const unauthUpload = await uploadMultipart(
       baseUrl,
       `/api/tasks/${taskAId}/attachments`,
@@ -286,11 +509,21 @@ async function main(): Promise<void> {
       'application/pdf',
       pdfBuffer
     );
-    check('RBAC bloquea subida de integrante2 en tarea ajena (403)', () => {
-      assert.equal(unauthUpload.status, 403);
-    });
 
-    // 4. Subida PDF compresible + evento Socket.IO + email con nombre del uploader + compresión gzip
+    check(
+      'Bloque 1: rechaza .svg, PDF falsificado, PPTX sin firma OOXML, >5 MB (400) y RBAC ajeno (403) sin subir a Drive',
+      () => {
+        assert.equal(badSvg.status, 400);
+        assert.equal(spoofedPdf.status, 400);
+        assert.equal(spoofedPptx.status, 400);
+        assert.equal(tooLarge.status, 400);
+        assert.equal(unauthUpload.status, 403);
+        assert.equal(driveState.driveFiles.size, 0);
+        assert.equal(driveState.driveFolders.size, 0);
+      }
+    );
+
+    // 1.2 Primera subida a Tarea A (.pdf) -> crea carpeta en Drive, persiste Task.driveFolderId, 0 blobs en PostgreSQL
     const attCreatedPromise = waitForEvent<{ taskId: string; attachment: TaskAttachment }>(
       liderSocket,
       'attachment:created',
@@ -304,60 +537,32 @@ async function main(): Promise<void> {
       'application/pdf',
       pdfBuffer
     );
-    const attEvent = await attCreatedPromise;
+    const attCreatedEvent = await attCreatedPromise;
 
-    check('Sube .pdf válido, comprime con gzip en PostgreSQL, emite attachment:created y envía correo con nombre del usuario', () => {
-      assert.equal(uploadPdfRes.status, 201);
-      assert.equal(uploadPdfRes.data.deduplicated, false);
-      assert.equal(uploadPdfRes.data.emailSent, true);
-      assert.equal(uploadPdfRes.data.attachment.isCompressed, true);
-      assert.ok(uploadPdfRes.data.attachment.storedBytes < uploadPdfRes.data.attachment.sizeBytes);
-      assert.equal(attEvent.attachment.id, uploadPdfRes.data.attachment.id);
-      assert.equal(sentEmails.length, 1);
-      assert.equal(sentEmails[0].uploader.displayName, m1.displayName);
-      assert.equal(sentEmails[0].attachment.originalName, 'reporte_final.pdf');
-      assert.ok(sentEmails[0].buffer.equals(pdfBuffer));
+    const taskAAfterFirst = await prisma.task.findUnique({
+      where: { id: taskAId },
+      select: { driveFolderId: true },
+    });
+    const pdfAttDb = await prisma.taskAttachment.findUnique({
+      where: { id: uploadPdfRes.data.attachment.id },
+      select: {
+        storageProvider: true,
+        driveFileId: true,
+        driveFolderId: true,
+        blobSha256: true,
+        contentSha256: true,
+      },
     });
 
-    // 5. Deduplicación SHA-256 al subir el MISMO archivo en Tarea B por integrante2
-    const dupUploadRes = await uploadMultipart<AttachmentUploadResponse>(
-      baseUrl,
-      `/api/tasks/${taskBId}/attachments`,
-      m2.token,
-      'copia_reporte.pdf',
-      'application/pdf',
-      pdfBuffer
-    );
-    const blobsAfterDup = await prisma.attachmentBlob.count();
-
-    check('Deduplicación SHA-256 reutiliza el blob existente (0 bytes binarios extra en DB)', () => {
-      assert.equal(dupUploadRes.status, 201);
-      assert.equal(dupUploadRes.data.deduplicated, true);
-      assert.equal(
-        dupUploadRes.data.attachment.blobSha256,
-        uploadPdfRes.data.attachment.blobSha256
-      );
-      assert.equal(blobsAfterDup, initialBlobCount + 1);
-    });
-
-    // 6. Subir .pptx, .docx, .png, .jpg
+    // 1.3 Segunda y tercera subida a Tarea A (.pptx y .png) deben reutilizar Task.driveFolderId
     const pptxRes = await uploadMultipart<AttachmentUploadResponse>(
       baseUrl,
       `/api/tasks/${taskAId}/attachments`,
       m1.token,
       'presentacion.pptx',
       'application/vnd.openxmlformats-officedocument.presentationml.presentation',
-      createMinimalOoxml('ppt/')
+      pptxBuffer
     );
-    const docxRes = await uploadMultipart<AttachmentUploadResponse>(
-      baseUrl,
-      `/api/tasks/${taskBId}/attachments`,
-      m2.token,
-      'documento.docx',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      createMinimalOoxml('word/')
-    );
-    const pngBuffer = createMinimalPng();
     const pngRes = await uploadMultipart<AttachmentUploadResponse>(
       baseUrl,
       `/api/tasks/${taskAId}/attachments`,
@@ -366,13 +571,31 @@ async function main(): Promise<void> {
       'image/png',
       pngBuffer
     );
+
+    // 1.4 Subidas a Tarea B (.pdf duplicado de contenido, .docx, .jpg, .pdf con BOM UTF-8)
+    const dupDrivePdfRes = await uploadMultipart<AttachmentUploadResponse>(
+      baseUrl,
+      `/api/tasks/${taskBId}/attachments`,
+      m2.token,
+      'copia_reporte.pdf',
+      'application/pdf',
+      pdfBuffer
+    );
+    const docxRes = await uploadMultipart<AttachmentUploadResponse>(
+      baseUrl,
+      `/api/tasks/${taskBId}/attachments`,
+      m2.token,
+      'documento.docx',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      docxBuffer
+    );
     const jpgRes = await uploadMultipart<AttachmentUploadResponse>(
       baseUrl,
-      `/api/tasks/${taskAId}/attachments`,
-      m1.token,
+      `/api/tasks/${taskBId}/attachments`,
+      m2.token,
       'foto.jpg',
       'image/jpeg',
-      createMinimalJpg()
+      jpgBuffer
     );
     const bomPdfRes = await uploadMultipart<AttachmentUploadResponse>(
       baseUrl,
@@ -380,20 +603,108 @@ async function main(): Promise<void> {
       m2.token,
       'con_bom.pdf',
       'application/pdf',
-      createBomPrefixedPdf()
+      bomPdfBuffer
     );
 
-    check('Soporta .pptx, .docx, .png, .jpg y .pdf con BOM UTF-8 válidos', () => {
-      assert.equal(pptxRes.status, 201);
-      assert.equal(docxRes.status, 201);
-      assert.equal(pngRes.status, 201);
-      assert.equal(jpgRes.status, 201);
-      assert.equal(bomPdfRes.status, 201);
-      assert.equal(pngRes.data.attachment.isPreviewableImage, true);
-      assert.equal(pptxRes.data.attachment.isPreviewableImage, false);
+    const taskAAfterAll = await prisma.task.findUnique({
+      where: { id: taskAId },
+      select: { driveFolderId: true },
+    });
+    const taskBAfterAll = await prisma.task.findUnique({
+      where: { id: taskBId },
+      select: { driveFolderId: true },
+    });
+    const blobsAfterDriveUploads = await prisma.attachmentBlob.count();
+    const listTaskARes = await requestJson<TaskAttachment[]>(
+      baseUrl,
+      `/api/tasks/${taskAId}/attachments`,
+      { token: m1.token }
+    );
+    const detailTaskARes = await requestJson<TaskDetail>(baseUrl, `/api/tasks/${taskAId}`, {
+      token: m1.token,
+    });
+    const taskADbRows = await prisma.taskAttachment.findMany({
+      where: { taskId: taskAId },
+      select: { id: true, driveFileId: true, driveFolderId: true },
+    });
+    const taskBDbRows = await prisma.taskAttachment.findMany({
+      where: { taskId: taskBId },
+      select: { id: true, driveFileId: true, driveFolderId: true },
     });
 
-    // 7. Descarga íntegra, Content-Disposition seguro y ETag 304
+    const knownDriveIds = [
+      taskAAfterAll?.driveFolderId ?? '',
+      taskBAfterAll?.driveFolderId ?? '',
+      ...taskADbRows.map((r) => r.driveFileId ?? ''),
+      ...taskBDbRows.map((r) => r.driveFileId ?? ''),
+    ];
+
+    check(
+      'Bloque 1: sube .pdf/.pptx/.docx/.png/.jpg/PDF-BOM a Drive con 0 bytes en PostgreSQL, reutiliza driveFolderId, oculta IDs de Drive en HTTP y dispara Gmail mock',
+      () => {
+        assert.equal(uploadPdfRes.status, 201);
+        assert.equal(uploadPdfRes.data.storageProvider, 'gdrive');
+        assert.equal(uploadPdfRes.data.emailSent, true);
+        assert.equal(uploadPdfRes.data.emailProvider, 'gmail_api');
+        assert.equal(uploadPdfRes.data.attachment.storageProvider, 'gdrive');
+        assert.equal(uploadPdfRes.data.attachment.storedBytes, 0);
+        assert.equal(uploadPdfRes.data.attachment.isCompressed, false);
+        assert.equal(uploadPdfRes.data.attachment.blobSha256, null);
+        assert.equal(uploadPdfRes.data.attachment.contentSha256, sha256Hex(pdfBuffer));
+
+        assert.equal(pptxRes.status, 201);
+        assert.equal(pptxRes.data.storageProvider, 'gdrive');
+        assert.equal(pptxRes.data.attachment.storedBytes, 0);
+        assert.equal(pngRes.status, 201);
+        assert.equal(pngRes.data.attachment.isPreviewableImage, true);
+        assert.equal(dupDrivePdfRes.status, 201);
+        assert.equal(dupDrivePdfRes.data.storageProvider, 'gdrive');
+        assert.equal(docxRes.status, 201);
+        assert.equal(jpgRes.status, 201);
+        assert.equal(bomPdfRes.status, 201);
+
+        assert.equal(blobsAfterDriveUploads, initialBlobCount);
+        assert.ok(taskAAfterFirst?.driveFolderId);
+        assert.equal(taskAAfterAll?.driveFolderId, taskAAfterFirst?.driveFolderId);
+        assert.ok(taskBAfterAll?.driveFolderId);
+        assert.notEqual(taskBAfterAll?.driveFolderId, taskAAfterFirst?.driveFolderId);
+
+        assert.equal(pdfAttDb?.storageProvider, 'gdrive');
+        assert.ok(pdfAttDb?.driveFileId);
+        assert.equal(pdfAttDb?.driveFolderId, taskAAfterFirst?.driveFolderId);
+        assert.equal(pdfAttDb?.blobSha256, null);
+        assert.equal(pdfAttDb?.contentSha256, sha256Hex(pdfBuffer));
+
+        // Verifica que la segunda subida a Tarea A reutilizó el folderId conocido
+        assert.equal(driveState.knownFolderIdsReceived[1], taskAAfterFirst?.driveFolderId);
+        assert.equal(driveState.knownFolderIdsReceived[2], taskAAfterFirst?.driveFolderId);
+        assert.equal(driveState.driveFolders.size, 2);
+        assert.equal(driveState.driveFiles.size, 7);
+
+        // Verifica que POST, GET /attachments, GET /tasks/:id y Socket.IO NO exponen IDs/URLs de Drive
+        assert.equal(listTaskARes.status, 200);
+        assert.equal(listTaskARes.data.length, 3);
+        assert.equal(detailTaskARes.status, 200);
+        assert.equal(detailTaskARes.data.attachmentCount, 3);
+        assertNoDriveSecretsExposed(uploadPdfRes.data, knownDriveIds, 'POST /attachments');
+        assertNoDriveSecretsExposed(attCreatedEvent, knownDriveIds, 'Socket attachment:created');
+        assertNoDriveSecretsExposed(listTaskARes.data, knownDriveIds, 'GET /attachments');
+        assertNoDriveSecretsExposed(detailTaskARes.data, knownDriveIds, 'GET /tasks/:id');
+
+        // Verifica correos enviados vía Gmail API mockeado
+        assert.equal(sentEmails.length, 7);
+        const firstEmail = sentEmails[0];
+        const firstDriveRecord = driveState.driveFiles.get(pdfAttDb?.driveFileId ?? '');
+        assert.ok(firstDriveRecord);
+        assert.equal(firstEmail.uploader.displayName, m1.displayName);
+        assert.equal(firstEmail.attachment.originalName, 'reporte_final.pdf');
+        assert.equal(firstEmail.driveWebViewLink, firstDriveRecord.webViewLink);
+        assert.ok(firstEmail.buffer.equals(pdfBuffer));
+      }
+    );
+
+    // 1.5 Descarga proxy JWT + Content-Disposition seguro + ETag 304 sin re-descargar de Drive
+    const callsBeforePdfDl = driveState.downloadCalls;
     const dlPdf = await fetch(
       `${baseUrl}/api/attachments/${uploadPdfRes.data.attachment.id}/download?inline=1`,
       {
@@ -402,6 +713,7 @@ async function main(): Promise<void> {
     );
     const dlPdfBuf = Buffer.from(await dlPdf.arrayBuffer());
     const etagPdf = dlPdf.headers.get('etag');
+    const callsAfterPdfDl = driveState.downloadCalls;
 
     const dlPdf304 = await fetch(
       `${baseUrl}/api/attachments/${uploadPdfRes.data.attachment.id}/download`,
@@ -412,6 +724,7 @@ async function main(): Promise<void> {
         },
       }
     );
+    const callsAfter304 = driveState.downloadCalls;
 
     const dlPngInline = await fetch(
       `${baseUrl}/api/attachments/${pngRes.data.attachment.id}/download?inline=1`,
@@ -421,103 +734,404 @@ async function main(): Promise<void> {
     );
     const dlPngBuf = Buffer.from(await dlPngInline.arrayBuffer());
 
-    const detailA = await requestJson<TaskDetail>(baseUrl, `/api/tasks/${taskAId}`, {
-      token: m1.token,
-    });
-    const storageRes = await requestJson<AttachmentStorageStats>(baseUrl, '/api/attachments/storage', {
-      token: m1.token,
-    });
+    const storageDriveRes = await requestJson<AttachmentStorageStats>(
+      baseUrl,
+      '/api/attachments/storage',
+      { token: m1.token }
+    );
 
-    check('Descarga descomprime exactamente el binario original, aplica ETag 304, protege Content-Disposition y reporta cuota', () => {
-      assert.equal(dlPdf.status, 200);
-      assert.ok(dlPdfBuf.equals(pdfBuffer));
-      assert.ok((dlPdf.headers.get('content-disposition') ?? '').startsWith('attachment;'));
-      assert.equal(dlPdf304.status, 304);
-      assert.equal(dlPngInline.status, 200);
-      assert.ok(dlPngBuf.equals(pngBuffer));
-      assert.ok((dlPngInline.headers.get('content-disposition') ?? '').startsWith('inline;'));
-      assert.equal(detailA.status, 200);
-      assert.equal(detailA.data.attachments.length, 4);
-      assert.equal(detailA.data.attachmentCount, 4);
-      assert.equal(storageRes.status, 200);
-      assert.ok(storageRes.data.savedBytes > 0);
-      assert.ok(storageRes.data.logicalBytes > storageRes.data.storedBytes);
-    });
+    check(
+      'Bloque 1: descarga proxy JWT entrega bytes exactos, Content-Disposition seguro, 304 sin re-descargar de Drive y /storage reporta gdrive',
+      () => {
+        assert.equal(dlPdf.status, 200);
+        assert.ok(dlPdfBuf.equals(pdfBuffer));
+        assert.ok((dlPdf.headers.get('content-disposition') ?? '').startsWith('attachment;'));
+        assert.ok(etagPdf);
+        assert.equal(callsAfterPdfDl, callsBeforePdfDl + 1);
 
-    // 8. Eliminación RBAC + Garbage Collection de blobs huérfanos
+        assert.equal(dlPdf304.status, 304);
+        assert.equal(callsAfter304, callsAfterPdfDl);
+
+        assert.equal(dlPngInline.status, 200);
+        assert.ok(dlPngBuf.equals(pngBuffer));
+        assert.ok((dlPngInline.headers.get('content-disposition') ?? '').startsWith('inline;'));
+
+        assert.equal(storageDriveRes.status, 200);
+        assert.equal(storageDriveRes.data.storageMode, 'gdrive');
+        assert.equal(storageDriveRes.data.usedBytes - initialDbUsedBytes, 0);
+        assert.ok(storageDriveRes.data.driveAttachments >= 7);
+        assert.ok(storageDriveRes.data.driveLogicalBytes > 0);
+        assert.equal(storageDriveRes.data.driveQuotaBytes, DRIVE_QUOTA_BYTES);
+        assert.ok(
+          storageDriveRes.data.driveUsedBytes !== null && storageDriveRes.data.driveUsedBytes > 0
+        );
+        assert.ok(storageDriveRes.data.savedBytes >= storageDriveRes.data.driveLogicalBytes);
+      }
+    );
+
+    // 1.6 Eliminación RBAC, eliminación de archivo único y eliminación de tarea completa en Drive
+    const pdfDriveId = pdfAttDb?.driveFileId ?? '';
     const forbiddenDel = await requestJson(
       baseUrl,
       `/api/attachments/${uploadPdfRes.data.attachment.id}`,
       { method: 'DELETE', token: m2.token }
     );
     assert.equal(forbiddenDel.status, 403);
+    assert.ok(driveState.driveFiles.has(pdfDriveId));
 
-    // Al borrar PDF de Tarea A, el blob NO se borra aún porque Tarea B sigue referenciándolo
-    const delPdfA = await requestJson<{ ok: boolean; removedBlob: boolean; freedBytes: number }>(
+    const delPdfA = await requestJson<DeleteAttachmentResponse>(
       baseUrl,
       `/api/attachments/${uploadPdfRes.data.attachment.id}`,
       { method: 'DELETE', token: m1.token }
     );
 
-    // Al borrar PNG único de Tarea A, el blob SÍ se borra inmediatamente de PostgreSQL
-    const delPngA = await requestJson<{ ok: boolean; removedBlob: boolean; freedBytes: number }>(
+    const remainingTaskAFileIds = taskADbRows
+      .map((r) => r.driveFileId ?? '')
+      .filter((id) => id && id !== pdfDriveId);
+    const taskAFolderId = taskAAfterAll?.driveFolderId ?? '';
+
+    await deleteTempTask(baseUrl, lider.token, taskAId, tempTaskIds);
+
+    const taskBFileIds = taskBDbRows.map((r) => r.driveFileId ?? '').filter(Boolean);
+    const taskBFolderId = taskBAfterAll?.driveFolderId ?? '';
+
+    await deleteTempTask(baseUrl, lider.token, taskBId, tempTaskIds);
+
+    check(
+      'Bloque 1: eliminación respeta RBAC, borra archivo único en Drive y DELETE /tasks/:id limpia archivos restantes y carpeta',
+      () => {
+        assert.equal(delPdfA.status, 200);
+        assert.equal(delPdfA.data.removedBlob, false);
+        assert.equal(delPdfA.data.removedFromDrive, true);
+        assert.ok(driveState.deletedFiles.includes(pdfDriveId));
+        assert.ok(!driveState.driveFiles.has(pdfDriveId));
+
+        for (const id of remainingTaskAFileIds) {
+          assert.ok(driveState.deletedFiles.includes(id));
+          assert.ok(!driveState.driveFiles.has(id));
+        }
+        assert.ok(driveState.deletedFolders.includes(taskAFolderId));
+        assert.ok(!driveState.driveFolders.has(taskAFolderId));
+
+        for (const id of taskBFileIds) {
+          assert.ok(driveState.deletedFiles.includes(id));
+          assert.ok(!driveState.driveFiles.has(id));
+        }
+        assert.ok(driveState.deletedFolders.includes(taskBFolderId));
+        assert.ok(!driveState.driveFolders.has(taskBFolderId));
+
+        assert.equal(driveState.driveFiles.size, 0);
+        assert.equal(driveState.driveFolders.size, 0);
+      }
+    );
+
+    // 1.7 Compensación ante error DB / límite > 10 adjuntos por actividad
+    const taskLimitId = await createTempTask(
       baseUrl,
-      `/api/attachments/${pngRes.data.attachment.id}`,
+      lider.token,
+      '__TEST__ Drive Limite y Compensacion',
+      lider.userId,
+      tempTaskIds
+    );
+
+    for (let i = 1; i <= 9; i++) {
+      const res = await uploadMultipart<AttachmentUploadResponse>(
+        baseUrl,
+        `/api/tasks/${taskLimitId}/attachments`,
+        lider.token,
+        `limite_${i}.png`,
+        'image/png',
+        pngBuffer
+      );
+      assert.equal(res.status, 201, `Falló subida ${i}/9 en prueba de límite`);
+    }
+
+    let raceTriggered = false;
+    let tenthUploadRes: HttpResult<AttachmentUploadResponse> | null = null;
+    driveState.onBeforeUpload = async (input) => {
+      if (
+        input.taskId === taskLimitId &&
+        input.originalName === 'carrera_limite.png' &&
+        !raceTriggered
+      ) {
+        raceTriggered = true;
+        tenthUploadRes = await uploadMultipart<AttachmentUploadResponse>(
+          baseUrl,
+          `/api/tasks/${taskLimitId}/attachments`,
+          lider.token,
+          'limite_10.png',
+          'image/png',
+          pngBuffer
+        );
+      }
+    };
+
+    const deletedBeforeRace = driveState.deletedFiles.length;
+    const raceLimitRes = await uploadMultipart(
+      baseUrl,
+      `/api/tasks/${taskLimitId}/attachments`,
+      lider.token,
+      'carrera_limite.png',
+      'image/png',
+      pngBuffer
+    );
+    driveState.onBeforeUpload = undefined;
+
+    const seq11Res = await uploadMultipart(
+      baseUrl,
+      `/api/tasks/${taskLimitId}/attachments`,
+      lider.token,
+      'limite_11.png',
+      'image/png',
+      pngBuffer
+    );
+
+    const limitDbRows = await prisma.taskAttachment.findMany({
+      where: { taskId: taskLimitId },
+      select: { driveFileId: true },
+    });
+    const limitDriveFiles = Array.from(driveState.driveFiles.values()).filter(
+      (f) => f.taskId === taskLimitId
+    );
+    const limitDbFileIdSet = new Set(
+      limitDbRows.map((row) => row.driveFileId).filter((id): id is string => Boolean(id))
+    );
+
+    await deleteTempTask(baseUrl, lider.token, taskLimitId, tempTaskIds);
+
+    check(
+      'Bloque 1: compensación ante límite >10 archivos / error transacción DB evita archivos huérfanos en Drive',
+      () => {
+        assert.equal(raceTriggered, true);
+        assert.equal(tenthUploadRes?.status, 201);
+        assert.equal(raceLimitRes.status, 400);
+        assert.equal(seq11Res.status, 400);
+        assert.ok(driveState.deletedFiles.length > deletedBeforeRace);
+        assert.equal(limitDbRows.length, 10);
+        assert.equal(limitDriveFiles.length, 10);
+        for (const driveFile of limitDriveFiles) {
+          assert.ok(limitDbFileIdSet.has(driveFile.fileId));
+        }
+        assert.equal(driveState.driveFiles.size, 0);
+        assert.equal(driveState.driveFolders.size, 0);
+      }
+    );
+
+    // =========================================================================
+    // BLOQUE 2 — Retrocompatibilidad / Fallback DB sin Google Drive
+    // =========================================================================
+    console.log('\n[test:attachments] Bloque 2: Retrocompatibilidad / Fallback DB (sin Drive)');
+
+    let fallbackDriveCalls = 0;
+    setGoogleDriveAdapterForTests({
+      isEnabled: () => false,
+      uploadFile: async () => {
+        fallbackDriveCalls += 1;
+        throw new Error('uploadFile no debe invocarse cuando Drive está deshabilitado');
+      },
+      downloadFile: async () => {
+        fallbackDriveCalls += 1;
+        throw new Error('downloadFile no debe invocarse cuando Drive está deshabilitado');
+      },
+      deleteFile: async () => {
+        fallbackDriveCalls += 1;
+        throw new Error('deleteFile no debe invocarse cuando Drive está deshabilitado');
+      },
+      deleteFolder: async () => {
+        fallbackDriveCalls += 1;
+        throw new Error('deleteFolder no debe invocarse cuando Drive está deshabilitado');
+      },
+      getStorageQuota: async () => {
+        fallbackDriveCalls += 1;
+        return null;
+      },
+    });
+
+    const dbEmailsStartIdx = sentEmails.length;
+    setMailDispatcherForTests(async (payload) => {
+      sentEmails.push(payload);
+      return { sent: true, provider: 'smtp' };
+    });
+
+    const taskDbAId = await createTempTask(
+      baseUrl,
+      lider.token,
+      '__TEST__ DB Fallback Tarea A',
+      m1.userId,
+      tempTaskIds
+    );
+    const taskDbBId = await createTempTask(
+      baseUrl,
+      lider.token,
+      '__TEST__ DB Fallback Tarea B',
+      m2.userId,
+      tempTaskIds
+    );
+
+    // 2.1 Subida compresible con gzip a PostgreSQL
+    const dbPdfRes = await uploadMultipart<AttachmentUploadResponse>(
+      baseUrl,
+      `/api/tasks/${taskDbAId}/attachments`,
+      m1.token,
+      'db_reporte.pdf',
+      'application/pdf',
+      pdfBuffer
+    );
+
+    // 2.2 Deduplicación SHA-256 en PostgreSQL (mismo contenido en otra tarea)
+    const dbDupPdfRes = await uploadMultipart<AttachmentUploadResponse>(
+      baseUrl,
+      `/api/tasks/${taskDbBId}/attachments`,
+      m2.token,
+      'copia_db_reporte.pdf',
+      'application/pdf',
+      pdfBuffer
+    );
+    const blobsAfterDbDup = await prisma.attachmentBlob.count();
+
+    // 2.3 Subida de imagen en modo DB
+    const dbPngRes = await uploadMultipart<AttachmentUploadResponse>(
+      baseUrl,
+      `/api/tasks/${taskDbAId}/attachments`,
+      m1.token,
+      'db_captura.png',
+      'image/png',
+      pngBuffer
+    );
+
+    check(
+      'Bloque 2: guarda en AttachmentBlob con gzip + deduplicación SHA-256 sin invocar Google Drive',
+      () => {
+        assert.equal(dbPdfRes.status, 201);
+        assert.equal(dbPdfRes.data.storageProvider, 'db');
+        assert.equal(dbPdfRes.data.deduplicated, false);
+        assert.equal(dbPdfRes.data.emailSent, true);
+        assert.equal(dbPdfRes.data.attachment.storageProvider, 'db');
+        assert.equal(dbPdfRes.data.attachment.isCompressed, true);
+        assert.ok(
+          dbPdfRes.data.attachment.storedBytes > 0 &&
+            dbPdfRes.data.attachment.storedBytes < dbPdfRes.data.attachment.sizeBytes
+        );
+        assert.equal(dbPdfRes.data.attachment.blobSha256, sha256Hex(pdfBuffer));
+        assert.equal(dbPdfRes.data.attachment.contentSha256, sha256Hex(pdfBuffer));
+
+        assert.equal(dbDupPdfRes.status, 201);
+        assert.equal(dbDupPdfRes.data.storageProvider, 'db');
+        assert.equal(dbDupPdfRes.data.deduplicated, true);
+        assert.equal(dbDupPdfRes.data.attachment.blobSha256, dbPdfRes.data.attachment.blobSha256);
+        assert.equal(blobsAfterDbDup, initialBlobCount + 1);
+
+        assert.equal(dbPngRes.status, 201);
+        assert.equal(dbPngRes.data.storageProvider, 'db');
+        assert.equal(dbPngRes.data.attachment.isPreviewableImage, true);
+        assert.equal(sentEmails.length, dbEmailsStartIdx + 3);
+        assert.equal(sentEmails[dbEmailsStartIdx].uploader.displayName, m1.displayName);
+        assert.ok(sentEmails[dbEmailsStartIdx].buffer.equals(pdfBuffer));
+      }
+    );
+
+    // 2.4 Descarga descomprimida, ETag 304 y /api/attachments/storage en modo DB
+    const dlDbPdf = await fetch(
+      `${baseUrl}/api/attachments/${dbPdfRes.data.attachment.id}/download?inline=1`,
+      {
+        headers: { Authorization: `Bearer ${m1.token}` },
+      }
+    );
+    const dlDbPdfBuf = Buffer.from(await dlDbPdf.arrayBuffer());
+    const etagDbPdf = dlDbPdf.headers.get('etag');
+
+    const dlDbPdf304 = await fetch(
+      `${baseUrl}/api/attachments/${dbPdfRes.data.attachment.id}/download`,
+      {
+        headers: {
+          Authorization: `Bearer ${m1.token}`,
+          ...(etagDbPdf ? { 'If-None-Match': etagDbPdf } : {}),
+        },
+      }
+    );
+
+    const dbStorageRes = await requestJson<AttachmentStorageStats>(
+      baseUrl,
+      '/api/attachments/storage',
+      { token: m1.token }
+    );
+
+    check('Bloque 2: descarga descomprime bytes exactos, aplica ETag 304 y /storage reporta db', () => {
+      assert.equal(dlDbPdf.status, 200);
+      assert.ok(dlDbPdfBuf.equals(pdfBuffer));
+      assert.ok((dlDbPdf.headers.get('content-disposition') ?? '').startsWith('attachment;'));
+      assert.equal(dlDbPdf304.status, 304);
+      assert.equal(dbStorageRes.status, 200);
+      assert.equal(dbStorageRes.data.storageMode, 'db');
+      assert.ok(dbStorageRes.data.usedBytes > initialDbUsedBytes);
+      assert.ok(dbStorageRes.data.logicalBytes > dbStorageRes.data.usedBytes);
+      assert.ok(dbStorageRes.data.savedBytes > 0);
+    });
+
+    // 2.5 Eliminación y garbage collection de AttachmentBlob
+    const delDbPdfA = await requestJson<DeleteAttachmentResponse>(
+      baseUrl,
+      `/api/attachments/${dbPdfRes.data.attachment.id}`,
+      { method: 'DELETE', token: m1.token }
+    );
+    const delDbPngA = await requestJson<DeleteAttachmentResponse>(
+      baseUrl,
+      `/api/attachments/${dbPngRes.data.attachment.id}`,
       { method: 'DELETE', token: m1.token }
     );
 
-    // Al eliminar Tarea B completa, sus adjuntos (copia_reporte.pdf + documento.docx) y blobs huérfanos se limpian automáticamente
-    const delTaskB = await requestJson<{ ok: boolean }>(baseUrl, `/api/tasks/${taskBId}`, {
-      method: 'DELETE',
-      token: lider.token,
-    });
-    assert.equal(delTaskB.status, 200);
-    tempTaskIds.splice(tempTaskIds.indexOf(taskBId), 1);
-
-    // También eliminar Tarea A
-    const delTaskA = await requestJson<{ ok: boolean }>(baseUrl, `/api/tasks/${taskAId}`, {
-      method: 'DELETE',
-      token: lider.token,
-    });
-    assert.equal(delTaskA.status, 200);
-    tempTaskIds.splice(tempTaskIds.indexOf(taskAId), 1);
+    await deleteTempTask(baseUrl, lider.token, taskDbBId, tempTaskIds);
+    await deleteTempTask(baseUrl, lider.token, taskDbAId, tempTaskIds);
 
     const finalBlobCount = await prisma.attachmentBlob.count();
     const finalAttachmentCount = await prisma.taskAttachment.count();
 
-    check('Eliminación respeta RBAC y limpia blobs huérfanos en PostgreSQL tanto por archivo como al eliminar tarea', () => {
-      assert.equal(delPdfA.status, 200);
-      assert.equal(delPdfA.data.removedBlob, false);
-      assert.equal(delPngA.status, 200);
-      assert.equal(delPngA.data.removedBlob, true);
-      assert.ok(delPngA.data.freedBytes > 0);
-      assert.equal(finalBlobCount, initialBlobCount);
-      assert.equal(finalAttachmentCount, initialAttachmentCount);
-    });
+    check(
+      'Bloque 2: limpieza de AttachmentBlob deja finalBlobCount === initialBlobCount y finalAttachmentCount === initialAttachmentCount',
+      () => {
+        assert.equal(delDbPdfA.status, 200);
+        assert.equal(delDbPdfA.data.removedBlob, false);
+        assert.equal(delDbPngA.status, 200);
+        assert.equal(delDbPngA.data.removedBlob, true);
+        assert.ok(delDbPngA.data.freedBytes > 0);
+        assert.equal(finalBlobCount, initialBlobCount);
+        assert.equal(finalAttachmentCount, initialAttachmentCount);
+        assert.equal(fallbackDriveCalls, 0);
+      }
+    );
 
+    // =========================================================================
+    // BLOQUE OPCIONAL — Verificación real de transporte de correo
+    // =========================================================================
     if (process.env.VERIFY_SMTP === '1') {
-      const smtpOk = await verifySmtpConnection();
-      check('Conexión SMTP Gmail verificada con credenciales de server/.env', () => {
-        assert.equal(smtpOk, true);
+      const mailOk = await verifyMailConnection();
+      const smtpOk = mailOk ? true : await verifySmtpConnection();
+      check('Transporte de correo verificado (Gmail REST API OAuth2 / respaldo SMTP)', () => {
+        assert.equal(mailOk || smtpOk, true);
       });
     }
 
     console.log(`\n[test:attachments] TODOS LOS CHECKS PASARON (${passed}/${passed}).`);
   } finally {
-    setMailDispatcherForTests(null);
-
-    for (const id of tempTaskIds) {
-      if (liderToken) {
-        await requestJson(baseUrl, `/api/tasks/${id}`, {
-          method: 'DELETE',
-          token: liderToken,
-        }).catch(() => undefined);
+    try {
+      for (const id of [...tempTaskIds]) {
+        if (liderToken) {
+          await requestJson(baseUrl, `/api/tasks/${id}`, {
+            method: 'DELETE',
+            token: liderToken,
+          }).catch(() => undefined);
+        }
       }
+    } finally {
+      setGoogleDriveAdapterForTests(null);
+      setMailDispatcherForTests(null);
     }
 
-    await prisma.activityLog.deleteMany({
-      where: { createdAt: { gte: startedAt } },
-    });
+    await prisma.activityLog
+      .deleteMany({
+        where: { createdAt: { gte: startedAt } },
+      })
+      .catch(() => undefined);
 
     for (const s of sockets) {
       s.disconnect();

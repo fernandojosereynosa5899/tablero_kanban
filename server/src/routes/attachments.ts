@@ -21,9 +21,16 @@ attachmentsRouter.param('id', validateIdParam('id'));
 
 attachmentsRouter.get('/:id/download', async (req, res, next) => {
   try {
-    const { attachment, buffer } = await attachmentService.getAttachmentBinary(String(req.params.id));
+    const { attachment, buffer, etag, notModified } =
+      await attachmentService.getAttachmentBinary(
+        String(req.params.id),
+        req.header('if-none-match')
+      );
 
-    if (req.headers['if-none-match'] === `"${attachment.blobSha256}"`) {
+    res.setHeader('ETag', etag);
+    res.setHeader('Cache-Control', 'private, max-age=3600');
+
+    if (notModified || !buffer) {
       res.status(304).end();
       return;
     }
@@ -33,8 +40,6 @@ attachmentsRouter.get('/:id/download', async (req, res, next) => {
 
     res.setHeader('Content-Type', attachment.mimeType);
     res.setHeader('Content-Length', String(buffer.length));
-    res.setHeader('ETag', `"${attachment.blobSha256}"`);
-    res.setHeader('Cache-Control', 'private, max-age=3600');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader(
       'Content-Security-Policy',

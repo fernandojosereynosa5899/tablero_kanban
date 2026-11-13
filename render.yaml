@@ -27,5 +27,13 @@ services:
         sync: false
       - key: MAIL_NOTIFY_TO
         sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
+      - key: GOOGLE_DRIVE_ROOT_FOLDER
+        value: Tablero Kanban
       - key: ATTACHMENTS_QUOTA_MB
         value: "512"

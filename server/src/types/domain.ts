@@ -98,6 +98,8 @@ export interface Task {
   attachmentCount: number;
 }
 
+export type AttachmentStorageProvider = 'gdrive' | 'db';
+
 export interface TaskAttachment {
   id: string;
   taskId: string;
@@ -108,7 +110,9 @@ export interface TaskAttachment {
   storedBytes: number;
   isCompressed: boolean;
   isPreviewableImage: boolean;
-  blobSha256: string;
+  storageProvider: AttachmentStorageProvider;
+  contentSha256: string;
+  blobSha256: string | null;
   createdAt: string;
   uploadedBy: UserPublic | null;
 }
@@ -116,17 +120,29 @@ export interface TaskAttachment {
 export interface AttachmentUploadResponse {
   attachment: TaskAttachment;
   deduplicated: boolean;
+  storageProvider: AttachmentStorageProvider;
   emailSent: boolean;
+  emailProvider?: 'gmail_api' | 'smtp';
   emailWarning?: string;
+  emailError?: string;
 }
 
 export interface AttachmentStorageStats {
-  logicalBytes: number;
+  storageMode: AttachmentStorageProvider;
+  usedBytes: number;
   storedBytes: number;
-  savedBytes: number;
-  quotaBytes: number;
+  logicalBytes: number;
   uniqueBlobs: number;
   totalAttachments: number;
+  driveAttachments: number;
+  driveLogicalBytes: number;
+  dbAttachments: number;
+  savedBytes: number;
+  quotaBytes: number;
+  usageRatio: number;
+  driveQuotaBytes: number | null;
+  driveUsedBytes: number | null;
+  driveUsageRatio: number | null;
 }
 
 export interface Comment {
@@ -167,7 +183,9 @@ export interface AttachmentRecordMeta {
   extension: string;
   mimeType: string;
   sizeBytes: number;
-  blobSha256: string;
+  storageProvider: string;
+  contentSha256: string | null;
+  blobSha256: string | null;
   createdAt: Date;
   uploadedBy: PrismaUser | null;
   blob?: {
@@ -253,6 +271,9 @@ export function toTaskDTO(task: TaskWithRelations): Task {
 
 export function toAttachmentDTO(att: AttachmentRecordMeta): TaskAttachment {
   const imageExts = new Set(['.png', '.jpg', '.jpeg', '.webp']);
+  const dbBlob = att.storageProvider === 'gdrive' ? null : (att.blob ?? null);
+  const storageProvider: AttachmentStorageProvider = dbBlob ? 'db' : 'gdrive';
+
   return {
     id: att.id,
     taskId: att.taskId,
@@ -260,9 +281,11 @@ export function toAttachmentDTO(att: AttachmentRecordMeta): TaskAttachment {
     extension: att.extension,
     mimeType: att.mimeType,
     sizeBytes: att.sizeBytes,
-    storedBytes: att.blob?.storedBytes ?? att.sizeBytes,
-    isCompressed: Boolean(att.blob?.isCompressed),
+    storedBytes: dbBlob ? dbBlob.storedBytes : 0,
+    isCompressed: dbBlob ? Boolean(dbBlob.isCompressed) : false,
     isPreviewableImage: imageExts.has(att.extension.toLowerCase()),
+    storageProvider,
+    contentSha256: att.contentSha256 ?? att.blobSha256 ?? '',
     blobSha256: att.blobSha256,
     createdAt: att.createdAt.toISOString(),
     uploadedBy: att.uploadedBy ? toUserPublic(att.uploadedBy) : null,

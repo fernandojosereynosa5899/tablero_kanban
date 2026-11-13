@@ -103,7 +103,7 @@ Construida con **React 19 + TypeScript + Vite + Tailwind CSS v4 + `@dnd-kit`** e
 - **Creación de actividades con 7 requisitos obligatorios**: tanto el formulario como `POST /api/tasks` exigen **Título**, **Descripción**, **Prioridad**, **Fecha límite** (`07/11/2026` – `19/12/2026`), **Responsable** (integrante o *Todo el equipo*), **Columna inicial** y al menos una **Subtarea inicial** (acompañado de alerta visual y notificación `OverdueTasksAlert` cuando vence sin estar aprobada).
 - **Estudio de Avatares SVG y Tema Claro/Oscuro**: avatares vectoriales ligeros (16 personajes, colores configurables y 8 accesorios) sincronizados en vivo entre sesiones.
 - **Guía de bienvenida integrada**: recorrido guiado de 4 pasos en el primer ingreso y accesible en cualquier momento desde el botón **Guía** en la barra superior.
-- **Archivos adjuntos optimizados y respaldo automático por correo**: carga segura mediante `multipart/form-data` (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.txt`, `.csv`; máx. 5 MB por archivo y 10 por tarea) con validación de firma binaria (*magic bytes*), recompresión previa de imágenes en navegador, **deduplicación SHA-256**, compresión `gzip` condicional en PostgreSQL (`AttachmentBlob`), liberación inmediata de espacio al borrar archivos/tareas y envío automático por correo SMTP con el archivo y el nombre de quien lo subió.
+- **Archivos adjuntos en Google Drive privado + Proxy JWT y respaldo por Gmail HTTPS**: carga segura mediante `multipart/form-data` (`.pdf`, `.docx`, `.pptx`, `.xlsx`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.txt`, `.csv`; máx. 5 MB por archivo y 10 por tarea) con validación de firma binaria (*magic bytes*) y recompresión previa de imágenes en navegador. En producción (Render Free) almacena los binarios en carpetas privadas de Google Drive (`Tablero Kanban/<Actividad>`) consumiendo **0 bytes binarios en PostgreSQL** para ahorrar la cuota de 1 GB, sirviendo descargas y vistas previas vía **Proxy JWT** (`/api/attachments/:id/download`) con `ETag` (`304`) y sin exponer enlaces de Drive; conserva retrocompatibilidad y fallback automático con deduplicación SHA-256 + `gzip` en PostgreSQL (`AttachmentBlob`). Además envía copia automática por correo vía **Gmail REST API v1 (HTTPS `443`)** —evitando el bloqueo de puertos SMTP `25`/`465`/`587` en Render Free— con respaldo SMTP local.
 
 ---
 
@@ -167,15 +167,15 @@ proyecto_maestria/
 │   └── package.json
 ├── server/                         # Backend Express + Socket.IO + Prisma
 │   ├── prisma/
-│   │   ├── schema.prisma           # Modelos User, Task, Subtask, Comment, ActivityLog
+│   │   ├── schema.prisma           # Modelos User, Task, Subtask, Comment, AttachmentBlob, TaskAttachment, ActivityLog
 │   │   └── seed.ts                 # Seed idempotente (6 usuarios y datos de ejemplo)
-│   ├── scripts/                    # check-db.ts, test-auth.ts, test-realtime.ts y utilidades QA
+│   ├── scripts/                    # check-db.ts, google-oauth-setup.ts, test-auth.ts, test-realtime.ts, test-attachments.ts, test-prod.ts, test-security.ts
 │   ├── src/
 │   │   ├── middleware/             # auth, errorHandler, rateLimit, security
 │   │   ├── realtime/               # Socket.IO server y event bus
-│   │   ├── routes/                 # auth, users, tasks, subtasks/comments, activity, security, health
-│   │   ├── services/               # authService, taskService, securityService
-│   │   ├── utils/                  # errors, validation (Zod + rango de fechas)
+│   │   ├── routes/                 # auth, users, tasks, subtasks, attachments, activity, security, health
+│   │   ├── services/               # authService, taskService, attachmentService, googleAuthService, googleDriveService, mailService, securityService
+│   │   ├── utils/                  # errors, fileValidation, validation (Zod + rango de fechas)
 │   │   ├── app.ts                  # Express + Helmet + CORS + static SPA en producción
 │   │   ├── config.ts               # Carga de variables de entorno y orígenes permitidos
 │   │   └── index.ts                # Arranque HTTP + apagado limpio
@@ -219,8 +219,18 @@ Copia [`server/.env.example`](./server/.env.example) a `server/.env` y completa 
 - `NODE_ENV`: `development` en local y **`production`** en Render (para servir `client/dist`).
 - `CLIENT_ORIGIN`: `http://localhost:5173` en local y `https://<tu-app>.onrender.com` en Render.
 - `SEED_INITIAL_PASSWORD`: clave inicial temporal del equipo al inicializar una BD vacía o correr pruebas locales (nunca en código fuente).
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `MAIL_NOTIFY_TO`: credenciales SMTP (Gmail con contraseña de aplicación) para adjuntos.
-- `ATTACHMENTS_QUOTA_MB`: cuota global reservada para archivos adjuntos en PostgreSQL (por defecto `512`).
+- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER`: credenciales OAuth 2.0 (valor por defecto de carpeta: `Tablero Kanban`) para almacenar adjuntos en **Google Drive privado + Proxy JWT** (0 B en PostgreSQL, protegiendo la cuota de 1 GB de Render Free) y enviar correos vía **Gmail REST API v1 sobre HTTPS `443`** (evitando el bloqueo de puertos SMTP `25`/`465`/`587` en Render Free).
+- `MAIL_NOTIFY_TO`: correo destinatario que recibe copia de cada archivo adjunto subido (tanto vía Gmail REST API como SMTP).
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`: credenciales SMTP opcionales como respaldo local cuando no se configura Google OAuth 2.0.
+- `ATTACHMENTS_QUOTA_MB`: cuota global reservada para adjuntos en PostgreSQL en modo respaldo/legado DB (por defecto `512`).
+
+#### Generar `GOOGLE_REFRESH_TOKEN` localmente
+1. En Google Cloud Console habilita **Google Drive API** y **Gmail API**, y crea un cliente OAuth 2.0 tipo **App de escritorio** (recomendado; el callback loopback funciona automáticamente) o tipo **Aplicación web** registrando `http://127.0.0.1:48152/oauth2callback` como URI de redireccionamiento autorizada.
+2. Ejecuta el asistente interactivo:
+   ```bash
+   npm --prefix server run google:auth
+   ```
+3. Autoriza los scopes `drive.file` y `gmail.send` en el navegador y copia `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN` y `GOOGLE_DRIVE_ROOT_FOLDER` en `server/.env` y en Render.
 
 ### 3. Instalar dependencias, migrar esquema y ejecutar seed
 
@@ -262,10 +272,11 @@ npm run dev:client
 | `npm --prefix server run db:push` | Sincroniza `schema.prisma` contra PostgreSQL |
 | `npm --prefix server run db:seed` | Ejecuta `prisma/seed.ts` de forma idempotente |
 | `npm --prefix server run db:check` | Verifica usuarios, conteos de tareas y hash inicial en PostgreSQL |
+| `npm --prefix server run google:auth` | Asistente CLI OAuth 2.0 (`drive.file` + `gmail.send`) para obtener `GOOGLE_REFRESH_TOKEN` |
 | `npm --prefix server test` | Ejecuta la suite completa (`test:auth` + `test:realtime` + `test:attachments`) |
 | `npm --prefix server run test:auth` | Valida autenticación, gestión de 6 cupos, roles, contraseñas y revocación JWT |
 | `npm --prefix server run test:realtime` | Valida Socket.IO, movimiento de tarjetas, subtareas, comentarios y permisos |
-| `npm --prefix server run test:attachments` | Valida formatos/magic bytes, deduplicación SHA-256, gzip, liberación en DB, RBAC y correo |
+| `npm --prefix server run test:attachments` | Valida modo Google Drive + Gmail HTTPS mockeados (Proxy JWT, `ETag` `304`, compensación) y retrocompatibilidad/fallback DB |
 
 ---
 

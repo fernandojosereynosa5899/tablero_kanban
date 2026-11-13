@@ -79,6 +79,10 @@ export const config = {
   smtpUser,
   smtpPass,
   mailNotifyTo: process.env.MAIL_NOTIFY_TO?.trim() || smtpUser,
+  googleClientId: process.env.GOOGLE_CLIENT_ID?.trim() || '',
+  googleClientSecret: process.env.GOOGLE_CLIENT_SECRET?.trim() || '',
+  googleRefreshToken: process.env.GOOGLE_REFRESH_TOKEN?.trim() || '',
+  googleDriveRootFolder: process.env.GOOGLE_DRIVE_ROOT_FOLDER?.trim() || 'Tablero Kanban',
   attachmentsQuotaMb:
     Number.isFinite(parsedQuotaMb) && parsedQuotaMb >= 16 ? parsedQuotaMb : 512,
 } as const;
