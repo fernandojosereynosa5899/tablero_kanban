@@ -1,0 +1,54 @@
+{
+  "name": "tablero-kanban-server",
+  "version": "1.0.0",
+  "description": "Servidor del Tablero Kanban: Express + Socket.IO + Prisma (PostgreSQL)",
+  "private": true,
+  "type": "commonjs",
+  "main": "dist/src/index.js",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "prisma generate && tsc -p tsconfig.json",
+    "start": "node dist/src/index.js",
+    "start:prod": "prisma db push --skip-generate && node dist/prisma/seed.js && node dist/src/index.js",
+    "db:push": "prisma db push",
+    "db:seed": "prisma db seed",
+    "db:check": "tsx scripts/check-db.ts",
+    "test:auth": "tsx scripts/test-auth.ts",
+    "test:realtime": "tsx scripts/test-realtime.ts",
+    "test:attachments": "tsx scripts/test-attachments.ts",
+    "test": "npm run test:auth && npm run test:realtime && npm run test:attachments"
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.19.3",
+    "bcryptjs": "^3.0.3",
+    "compression": "^1.8.2",
+    "cors": "^2.8.6",
+    "dotenv": "^18.0.10",
+    "express": "^4.22.3",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "multer": "^2.5.0",
+    "nodemailer": "^10.5.0",
+    "socket.io": "^4.8.4",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/compression": "^1.8.1",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^4.17.25",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/multer": "^2.3.0",
+    "@types/node": "^26.6.6",
+    "@types/nodemailer": "^8.0.2",
+    "prisma": "^6.19.3",
+    "socket.io-client": "^4.8.4",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

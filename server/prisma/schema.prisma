@@ -1,0 +1,147 @@
+// Esquema de datos del Tablero Kanban colaborativo (PostgreSQL en Render)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  LEADER
+  SUBLEADER
+  MEMBER
+}
+
+enum TaskStatus {
+  TODO
+  IN_PROGRESS
+  DONE
+  APPROVED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String   @unique
+  passwordHash String
+  displayName  String
+  role         Role     @default(MEMBER)
+  avatar       Json
+  /// Cupo 1..6 (slot 1 = líder)
+  slot         Int      @unique
+  /// Se incrementa para invalidar los JWT emitidos (cambio/restablecimiento de contraseña)
+  tokenVersion Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  assignedTasks Task[]           @relation("TaskAssignee")
+  createdTasks  Task[]           @relation("TaskCreator")
+  comments      Comment[]
+  attachments   TaskAttachment[]
+  activity      ActivityLog[]
+}
+
+model Task {
+  id          String     @id @default(cuid())
+  title       String
+  description String     @default("")
+  status      TaskStatus @default(TODO)
+  priority    Priority   @default(MEDIUM)
+  dueDate     DateTime?
+  position    Float      @default(0)
+  /// Color del post-it (hex)
+  color       String?
+  assigneeId    String?
+  assignee      User?      @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  assignedToAll Boolean    @default(false)
+  createdById   String?
+  createdBy     User?      @relation("TaskCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedAt  DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  subtasks    Subtask[]
+  comments    Comment[]
+  attachments TaskAttachment[]
+  activity    ActivityLog[]
+
+  @@index([status, position])
+  @@index([assigneeId])
+}
+
+model Subtask {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  title     String
+  done      Boolean  @default(false)
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([taskId, position])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  content   String
+  createdAt DateTime @default(now())
+
+  @@index([taskId, createdAt])
+}
+
+/// Almacén binario deduplicado por SHA-256 con compresión gzip condicional
+model AttachmentBlob {
+  sha256       String   @id
+  data         Bytes
+  rawBytes     Int
+  storedBytes  Int
+  isCompressed Boolean  @default(false)
+  createdAt    DateTime @default(now())
+
+  attachments TaskAttachment[]
+}
+
+model TaskAttachment {
+  id           String         @id @default(cuid())
+  taskId       String
+  task         Task           @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  uploadedById String?
+  uploadedBy   User?          @relation(fields: [uploadedById], references: [id], onDelete: SetNull)
+  blobSha256   String
+  blob         AttachmentBlob @relation(fields: [blobSha256], references: [sha256], onDelete: Restrict)
+  originalName String
+  extension    String
+  mimeType     String
+  sizeBytes    Int
+  createdAt    DateTime       @default(now())
+
+  @@index([taskId, createdAt])
+  @@index([blobSha256])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  taskId    String?
+  task      Task?    @relation(fields: [taskId], references: [id], onDelete: SetNull)
+  /// task.created|task.updated|task.moved|task.approved|task.deleted|comment.created|subtask.toggled|attachment.uploaded|attachment.deleted|user.updated|user.created|user.deleted|auth.login
+  action    String
+  details   Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
