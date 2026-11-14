@@ -80,7 +80,8 @@ export const globalApiLimiter = createRateLimiter({
   windowMs: 60_000,
   max: 600,
   message: 'Demasiadas solicitudes seguidas. Intenta de nuevo en unos segundos.',
-  skip: (req) => req.path === '/health' || req.path === '/api/health',
+  skip: (req) =>
+    req.method === 'OPTIONS' || req.path === '/health' || req.path === '/api/health',
 });
 
 export const mutationApiLimiter = createRateLimiter({

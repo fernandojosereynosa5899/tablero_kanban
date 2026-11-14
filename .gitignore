@@ -37,3 +37,6 @@ Thumbs.db
 # Hojas locales con credenciales de acceso y paquetes comprimidos
 *.xlsx
 *.zip
+
+# Vercel CLI local link
+.vercel/

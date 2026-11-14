@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from 'express';
+import { isOriginAllowed } from '../config';
 
 const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 // eslint-disable-next-line no-control-regex
@@ -47,13 +48,19 @@ export function sanitizeInputMiddleware(req: Request, _res: Response, next: Next
   next();
 }
 
-export function securityHeadersMiddleware(_req: Request, res: Response, next: NextFunction): void {
+export function securityHeadersMiddleware(req: Request, res: Response, next: NextFunction): void {
   res.setHeader(
     'Permissions-Policy',
     'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()',
   );
   res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
-  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  const origin = req.headers.origin;
+  const isCrossOriginApiCall =
+    typeof origin === 'string' &&
+    origin.length > 0 &&
+    (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) &&
+    isOriginAllowed(origin);
+  res.setHeader('Cross-Origin-Resource-Policy', isCrossOriginApiCall ? 'cross-origin' : 'same-origin');
   next();
 }
 

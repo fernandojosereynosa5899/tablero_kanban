@@ -92,6 +92,7 @@ export function createServer() {
         callback(new Error('Origen no permitido por CORS'));
       },
       credentials: true,
+      exposedHeaders: ['Content-Disposition', 'ETag'],
     }),
   );
   app.use(express.json({ limit: '100kb' }));

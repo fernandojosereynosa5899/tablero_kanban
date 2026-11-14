@@ -33,6 +33,17 @@ let authToken: string | null = null;
 let unauthorizedHandler: UnauthorizedHandler | null = null;
 let maintenanceHandler: MaintenanceHandler | null = null;
 
+const rawApiBaseUrl = (import.meta.env.VITE_API_URL ?? '').trim();
+export const API_BASE_URL = rawApiBaseUrl ? rawApiBaseUrl.replace(/\/+$/, '') : '';
+
+export function buildApiUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) {
+    return path;
+  }
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  return `${API_BASE_URL}${normalizedPath}`;
+}
+
 export function setApiAuthToken(token: string | null): void {
   authToken = token;
 }
@@ -70,7 +81,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   let response: Response;
   try {
-    response = await fetch(path, {
+    response = await fetch(buildApiUrl(path), {
       method,
       headers,
       body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
@@ -385,10 +396,13 @@ export const api = {
     let response: Response;
     try {
       const qs = inline ? '?inline=1' : '';
-      response = await fetch(`/api/attachments/${encodeURIComponent(attachmentId)}/download${qs}`, {
-        method: 'GET',
-        headers,
-      });
+      response = await fetch(
+        buildApiUrl(`/api/attachments/${encodeURIComponent(attachmentId)}/download${qs}`),
+        {
+          method: 'GET',
+          headers,
+        },
+      );
     } catch {
       throw new ApiError(0, 'No se pudo descargar el archivo desde el servidor');
     }

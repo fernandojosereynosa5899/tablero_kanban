@@ -40,34 +40,81 @@ const rawMaintenanceEta = process.env.MAINTENANCE_ETA_MINUTES?.trim() ?? '';
 const parsedMaintenanceEta = rawMaintenanceEta ? Number(rawMaintenanceEta) : NaN;
 const smtpUser = process.env.SMTP_USER?.trim() || '';
 const smtpPass = process.env.SMTP_PASS?.trim() || '';
-const clientOrigin = process.env.CLIENT_ORIGIN?.trim() || 'http://localhost:5173';
-const renderExternalUrl = process.env.RENDER_EXTERNAL_URL?.trim() || '';
+function normalizeOrigin(raw: string): string {
+  const trimmed = raw.trim().replace(/\/+$/, '');
+  if (!trimmed) return '';
+  if (trimmed.includes('*')) {
+    return trimmed;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+      return parsed.origin;
+    }
+  } catch {
+    // Conservar cadena recortada si no corresponde a una URL completa
+  }
+  return trimmed;
+}
+
+function compileOriginWildcard(pattern: string): RegExp | null {
+  if (!pattern.includes('*')) return null;
+  const match = /^(https?):\/\/([a-z0-9*.-]+)(:\d+)?$/i.exec(pattern);
+  if (!match) return null;
+  const [, protocol, hostPattern, port = ''] = match;
+  const fixedLabels = hostPattern.split('.').filter((label) => label && !label.includes('*'));
+  if (fixedLabels.length < 2) {
+    return null;
+  }
+  const escapedHost = hostPattern
+    .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*/g, '[a-z0-9-]+');
+  const escapedPort = port.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`^${protocol.toLowerCase()}:\\/\\/${escapedHost}${escapedPort}$`, 'i');
+}
+
+const clientOrigin = normalizeOrigin(process.env.CLIENT_ORIGIN ?? '') || 'http://localhost:5173';
+const renderExternalUrl = normalizeOrigin(process.env.RENDER_EXTERNAL_URL ?? '');
 const extraAllowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
   .split(',')
-  .map((item) => item.trim())
+  .map((item) => normalizeOrigin(item))
   .filter(Boolean);
 
-const prodAllowedOrigins = new Set<string>([
+const rawAllowedEntries = [
   'https://tablero-kanban.onrender.com',
   clientOrigin,
   ...extraAllowedOrigins,
   ...(renderExternalUrl ? [renderExternalUrl] : []),
-]);
+];
+
+const prodAllowedOrigins = new Set<string>(
+  rawAllowedEntries.filter((entry) => !entry.includes('*')),
+);
+const prodAllowedOriginPatterns = rawAllowedEntries
+  .map((entry) => compileOriginWildcard(entry))
+  .filter((re): re is RegExp => re !== null);
 
 export function isOriginAllowed(origin: string | undefined): boolean {
   if (!origin) return true;
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)) {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
     return true;
   }
   if (isProd) {
-    if (prodAllowedOrigins.has(origin)) return true;
+    if (prodAllowedOrigins.has(normalized)) return true;
+    if (prodAllowedOriginPatterns.some((re) => re.test(normalized))) return true;
     // Permite el dominio propio del servicio en Render (*.onrender.com con HTTPS)
-    if (/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.onrender\.com$/i.test(origin)) {
+    if (/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.onrender\.com$/i.test(normalized)) {
       return true;
     }
     return false;
   }
-  return origin === clientOrigin || prodAllowedOrigins.has(origin);
+  return (
+    normalized === clientOrigin ||
+    prodAllowedOrigins.has(normalized) ||
+    prodAllowedOriginPatterns.some((re) => re.test(normalized))
+  );
 }
 
 export const config = {

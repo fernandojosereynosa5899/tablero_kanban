@@ -1,4 +1,5 @@
 import { io, type Socket } from 'socket.io-client';
+import { API_BASE_URL } from './api';
 import type {
   Activity,
   Comment,
@@ -102,8 +103,19 @@ export interface SocketHandlers {
   onMaintenanceReject?: () => void;
 }
 
+export function resolveSocketUrl(): string {
+  const rawSocketUrl = (import.meta.env.VITE_SOCKET_URL ?? '').trim();
+  if (rawSocketUrl) {
+    return rawSocketUrl.replace(/\/+$/, '');
+  }
+  if (API_BASE_URL) {
+    return API_BASE_URL;
+  }
+  return typeof window !== 'undefined' ? window.location.origin : '';
+}
+
 export function createKanbanSocket(token: string, handlers: SocketHandlers = {}): KanbanSocket {
-  const socket: KanbanSocket = io(window.location.origin, {
+  const socket: KanbanSocket = io(resolveSocketUrl(), {
     auth: { token },
     transports: ['websocket', 'polling'],
     autoConnect: false,

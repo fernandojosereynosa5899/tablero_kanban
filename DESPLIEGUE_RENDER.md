@@ -147,3 +147,33 @@ El servidor calcula el estado efectivo (`GET /api/maintenance/status`) siguiendo
   npm --prefix server run test:maintenance
   ```
   Valida precedencia (`env` > `file` > `database`), `GET /api/health` en `200`, HTML `503` CSP-safe + `/maintenance-client.js`, bloqueo `503` y Socket.IO para integrantes/sublíder, control exclusivo del Líder y emisión `maintenance:updated`.
+
+## 9. Arquitectura Híbrida recomendada: Frontend en Vercel + Backend en Render
+
+Si deseas servir la interfaz React/Vite desde el CDN global de **Vercel** conservando el servidor Express + Socket.IO + Google Drive Proxy en **Render** (sin afectar WebSockets, presencia en memoria ni el límite de `5 MB` en adjuntos):
+
+1. **Variables en Render (Backend `tablero-kanban`):**
+   - Mantén las mismas claves del backend (`DATABASE_URL`, `JWT_SECRET` de al menos 32 caracteres — recomendado 64 hex, `NODE_ENV=production`, `ATTACHMENTS_QUOTA_MB=512`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER`, `MAIL_NOTIFY_TO`).
+   - Actualiza `CLIENT_ORIGIN` al dominio productivo de Vercel sin barra diagonal final (ej. `https://tu-tablero.vercel.app`).
+   - Opcional: configura `ALLOWED_ORIGINS` (separado por comas) si usas despliegues *Preview* de Vercel o un dominio personalizado (ej. `https://tu-tablero-*.vercel.app,https://tudominio.com`).
+2. **Proyecto en Vercel (Frontend Vite):**
+   - Conecta el repositorio en Vercel (`vercel.json` en raíz y `client/vercel.json` soportan tanto raíz `.` como *Root Directory* = `client`).
+   - Agrega la variable de entorno en Vercel:
+     - `VITE_API_URL` = `https://tablero-kanban-th2h.onrender.com` *(URL HTTPS de tu backend en Render, sin `/` al final)*.
+   - Al redesplegar Vercel, toda llamada REST (`/api/*`), descarga/vista previa Proxy (`/api/attachments/:id/download`) y Socket.IO en tiempo real apuntarán automáticamente al backend en Render manteniendo las mismas pantallas, permisos y ventana de mantenimiento.
+
+## 10. Cómo probar Google Drive privado + Gmail HTTPS
+
+1. **Prueba automatizada local (sin credenciales Google):**
+   ```bash
+   npm --prefix server run test:attachments
+   ```
+   Valida reutilización de carpetas por tarea, almacenamiento `0 B` en PostgreSQL (`AttachmentBlob`), descarga proxy con JWT, caché `ETag` (`304 Not Modified`), envío de respaldo y borrado sincronizado en Drive.
+2. **Prueba real con tu cuenta Google (`fernando.jose.reynosa@gmail.com`):**
+   - Obtén el token OAuth 2.0 ejecutando localmente:
+     ```bash
+     npm --prefix server run google:auth
+     ```
+   - Agrega `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER="Tablero Kanban"` y `MAIL_NOTIFY_TO` en `server/.env` (local) y en **Environment Variables** de Render (producción), asegurándote de que `MAINTENANCE_MODE` esté en `false` cuando vayas a probar el tablero.
+   - Abre el detalle de una actividad y verifica que el cuadro de adjuntos muestre **Almacenamiento privado en Google Drive + envío automático por Gmail HTTPS**.
+   - Sube un archivo de prueba (`.pdf` o `.png`), verifica la etiqueta **`Google Drive · 0 B DB`**, revisa en Google Drive la carpeta **`Tablero Kanban/<Actividad>`**, comprueba el correo en `MAIL_NOTIFY_TO` y valida **Ver**, **Descargar** y **Eliminar** desde la tarjeta.

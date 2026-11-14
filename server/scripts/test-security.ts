@@ -48,6 +48,8 @@ async function main(): Promise<void> {
       ...process.env,
       NODE_ENV: 'production',
       PORT: String(PORT),
+      CLIENT_ORIGIN: 'https://tablero-kanban-demo.vercel.app/',
+      ALLOWED_ORIGINS: 'https://tablero-kanban-preview-*.vercel.app/',
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -72,17 +74,40 @@ async function main(): Promise<void> {
     assert.ok((rootRes.headers.get('permissions-policy') || '').includes('camera=()'));
     console.log('[test:security] 1. Headers HTTP + CSP + X-Frame-Options DENY -> OK');
 
-    // 2. Verificar CORS estricto: bloquea origen malicioso y permite Render
+    // 2. Verificar CORS estricto: permite Render, CLIENT_ORIGIN (Vercel) y ALLOWED_ORIGINS; bloquea otros orígenes
     const allowedCors = await fetch(`${BASE_URL}/api/health`, {
       headers: { Origin: 'https://tablero-kanban.onrender.com' },
     });
     assert.equal(allowedCors.headers.get('access-control-allow-origin'), 'https://tablero-kanban.onrender.com');
+    assert.equal(allowedCors.headers.get('cross-origin-resource-policy'), 'cross-origin');
+
+    const allowedVercelCors = await fetch(`${BASE_URL}/api/health`, {
+      headers: { Origin: 'https://tablero-kanban-demo.vercel.app' },
+    });
+    assert.equal(
+      allowedVercelCors.headers.get('access-control-allow-origin'),
+      'https://tablero-kanban-demo.vercel.app',
+    );
+    assert.equal(allowedVercelCors.headers.get('cross-origin-resource-policy'), 'cross-origin');
+
+    const allowedPreviewCors = await fetch(`${BASE_URL}/api/health`, {
+      headers: { Origin: 'https://tablero-kanban-preview-pr42.vercel.app' },
+    });
+    assert.equal(
+      allowedPreviewCors.headers.get('access-control-allow-origin'),
+      'https://tablero-kanban-preview-pr42.vercel.app',
+    );
+
+    const blockedVercelCors = await fetch(`${BASE_URL}/api/health`, {
+      headers: { Origin: 'https://evil-attacker.vercel.app' },
+    });
+    assert.equal(blockedVercelCors.headers.get('access-control-allow-origin'), null);
 
     const blockedCors = await fetch(`${BASE_URL}/api/health`, {
       headers: { Origin: 'https://evil-attacker.example' },
     });
     assert.equal(blockedCors.headers.get('access-control-allow-origin'), null);
-    console.log('[test:security] 2. CORS estricto bloquea origen no autorizado -> OK');
+    console.log('[test:security] 2. CORS estricto (Render + Vercel normalizado + preview vs bloqueados) -> OK');
 
     // 3. Login como Kuri (integrante2) y validar firma JWT HS256 / rechazo de alg=none
     const teamCredential = getTestUserPassword();
