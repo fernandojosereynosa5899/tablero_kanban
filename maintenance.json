@@ -1,6 +1,6 @@
 {
-  "enabled": false,
+  "enabled": true,
   "title": "Tablero Kanban en mantenimiento",
-  "message": "Estamos aplicando mejoras y actualizaciones en la plataforma. En unos minutos todo volverá a estar disponible automáticamente.",
-  "estimatedMinutes": 5
+  "message": "Estamos adaptando el despliegue híbrido (Frontend en Vercel + Backend en Render). En unos minutos el tablero volverá a estar disponible automáticamente.",
+  "estimatedMinutes": 3
 }
