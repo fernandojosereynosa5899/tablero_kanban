@@ -1,6 +1,6 @@
 {
-  "enabled": false,
+  "enabled": true,
   "title": "Tablero Kanban en mantenimiento",
-  "message": "Estamos aplicando mejoras y actualizaciones en la plataforma. En unos minutos todo volverá a estar disponible automáticamente.",
-  "estimatedMinutes": 5
+  "message": "Estamos realizando mejoras integrales y mantenimiento programado en el Tablero Kanban. En unos minutos todo volverá a estar disponible automáticamente.",
+  "estimatedMinutes": 10
 }
