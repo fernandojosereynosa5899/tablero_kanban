@@ -1,3 +1,4 @@
+import { memo, useMemo } from 'react';
 import { useDroppable } from '@dnd-kit/core';
 import { SortableContext, verticalListSortingStrategy } from '@dnd-kit/sortable';
 import { Lock, Plus } from 'lucide-react';
@@ -18,7 +19,7 @@ interface KanbanColumnProps {
   onCreateInColumn?: (status: TaskStatus) => void;
 }
 
-export function KanbanColumn({
+export const KanbanColumn = memo(function KanbanColumn({
   column,
   tasks,
   hasActiveFilters,
@@ -37,6 +38,8 @@ export function KanbanColumn({
       status: column.status,
     },
   });
+
+  const taskIds = useMemo(() => tasks.map((t) => t.id), [tasks]);
 
   const isForbiddenForMember =
     isDraggingActive && isOver && currentUserRole !== 'LEADER' && column.status === 'APPROVED';
@@ -73,16 +76,15 @@ export function KanbanColumn({
               {column.label}
             </h3>
             <span
-              className="rounded-full px-2 py-0.5 text-[11px] font-bold"
+              className="rounded-full px-2 py-0.5 text-[11px] font-bold text-slate-800 dark:text-slate-100"
               style={{
-                backgroundColor: `${column.color}20`,
-                color: column.color,
+                backgroundColor: `${column.color}28`,
               }}
             >
               {tasks.length}
             </span>
           </div>
-          <p className="mt-1 text-[11px] text-slate-500 dark:text-slate-400 line-clamp-1">
+          <p className="mt-1 text-[11px] text-slate-600 dark:text-slate-400 line-clamp-1">
             {column.description}
           </p>
         </div>
@@ -93,7 +95,7 @@ export function KanbanColumn({
             onClick={() => onCreateInColumn(column.status)}
             title={`Agregar actividad en ${column.label}`}
             aria-label={`Agregar actividad en ${column.label}`}
-            className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-lg p-1.5 text-slate-400 transition hover:bg-white hover:text-slate-700 hover:shadow-xs dark:hover:bg-slate-800 dark:hover:text-slate-200"
+            className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-lg p-1.5 text-slate-500 transition hover:bg-white hover:text-slate-700 hover:shadow-xs dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
           >
             <Plus className="h-4 w-4" />
           </button>
@@ -109,12 +111,12 @@ export function KanbanColumn({
       ) : null}
 
       {/* Lista sorteable de tarjetas */}
-      <SortableContext items={tasks.map((t) => t.id)} strategy={verticalListSortingStrategy}>
+      <SortableContext items={taskIds} strategy={verticalListSortingStrategy}>
         <div className="flex flex-1 flex-col gap-3">
           {tasks.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center rounded-xl border border-dashed border-slate-200/90 bg-white/50 px-4 py-8 text-center dark:border-slate-800 dark:bg-slate-900/40">
               <EmptyColumnIllustration className="opacity-85" />
-              <p className="mt-2.5 text-xs font-medium text-slate-500 dark:text-slate-400">
+              <p className="mt-2.5 text-xs font-medium text-slate-600 dark:text-slate-400">
                 {hasActiveFilters
                   ? 'Ninguna actividad coincide con los filtros'
                   : 'Sin actividades en esta columna'}
@@ -136,4 +138,4 @@ export function KanbanColumn({
       </SortableContext>
     </div>
   );
-}
+});

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   ArrowLeft,
@@ -15,6 +15,7 @@ import {
   X,
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { PROJECT_DATE_MAX, PROJECT_DATE_MIN } from '../../types/kanban';
 
 interface OnboardingTutorialModalProps {
@@ -152,11 +153,16 @@ const STEPS: TutorialStep[] = [
 export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialModalProps) {
   const { user } = useAuth();
   const [currentStep, setCurrentStep] = useState(0);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useFocusTrap(dialogRef, {
+    enabled: open && Boolean(user),
+    onClose,
+  });
 
   useEffect(() => {
     if (!open) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
       if (e.key === 'ArrowRight') {
         setCurrentStep((s) => Math.min(STEPS.length - 1, s + 1));
       }
@@ -166,7 +172,7 @@ export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialMod
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
+  }, [open]);
 
   if (!user) return null;
 
@@ -192,15 +198,17 @@ export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialMod
           onClick={onClose}
         >
           <motion.div
+            ref={dialogRef}
             initial={{ scale: 0.94, opacity: 0, y: 16 }}
             animate={{ scale: 1, opacity: 1, y: 0 }}
             exit={{ scale: 0.95, opacity: 0, y: 12 }}
             transition={{ type: 'spring', damping: 25, stiffness: 320 }}
-            className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            className="flex max-h-[92vh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-slate-200/90 bg-white shadow-2xl focus:outline-none dark:border-slate-800 dark:bg-slate-900"
             onClick={(e) => e.stopPropagation()}
             role="dialog"
             aria-modal="true"
             aria-label="Tutorial guiado del Tablero Kanban"
+            tabIndex={-1}
           >
             {/* Encabezado del modal */}
             <div className="relative border-b border-slate-100 bg-slate-50/70 px-5 py-4 dark:border-slate-800 dark:bg-slate-800/40 sm:px-7">
@@ -212,7 +220,7 @@ export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialMod
                     <HelpCircle className="h-3.5 w-3.5" />
                     <span>{step.badge}</span>
                   </span>
-                  <span className="hidden text-xs font-semibold text-slate-400 sm:inline">
+                  <span className="hidden text-xs font-semibold text-slate-600 dark:text-slate-400 sm:inline">
                     Guía de bienvenida
                   </span>
                 </div>
@@ -221,14 +229,14 @@ export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialMod
                   type="button"
                   onClick={onClose}
                   aria-label="Cerrar tutorial"
-                  className="rounded-xl p-1.5 text-slate-400 transition hover:bg-slate-200 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-white"
+                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-1.5 text-slate-500 transition hover:bg-slate-200 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-700 dark:hover:text-white"
                 >
                   <X className="h-5 w-5" />
                 </button>
               </div>
 
-              {/* Indicador de pasos (píldoras interactivas) */}
-              <div className="mt-3 flex items-center gap-2">
+              {/* Indicador de pasos (píldoras interactivas con área táctil >= 24px) */}
+              <div className="mt-2 flex items-center gap-2">
                 {STEPS.map((s, idx) => {
                   const active = idx === currentStep;
                   const visited = idx < currentStep;
@@ -237,16 +245,20 @@ export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialMod
                       key={s.title}
                       type="button"
                       onClick={() => setCurrentStep(idx)}
-                      className={`h-2 flex-1 rounded-full transition-all duration-200 ${
-                        active
-                          ? 'bg-blue-600 dark:bg-blue-500 ring-2 ring-blue-400/40'
-                          : visited
-                            ? 'bg-slate-300 dark:bg-slate-700'
-                            : 'bg-slate-200 dark:bg-slate-800'
-                      }`}
+                      className="flex min-h-[24px] flex-1 items-center py-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded-full"
                       aria-label={`Ir al paso ${idx + 1}`}
                       title={`Paso ${idx + 1}: ${s.title}`}
-                    />
+                    >
+                      <span
+                        className={`block h-2 w-full rounded-full transition-all duration-200 ${
+                          active
+                            ? 'bg-blue-600 dark:bg-blue-500 ring-2 ring-blue-400/40'
+                            : visited
+                              ? 'bg-slate-400 dark:bg-slate-600'
+                              : 'bg-slate-200 dark:bg-slate-800'
+                        }`}
+                      />
+                    </button>
                   );
                 })}
               </div>
@@ -301,8 +313,8 @@ export function OnboardingTutorialModal({ open, onClose }: OnboardingTutorialMod
 
             {/* Pie de navegación */}
             <div className="flex flex-col-reverse sm:flex-row sm:items-center sm:justify-between gap-3 border-t border-slate-100 bg-slate-50/80 px-5 py-3.5 dark:border-slate-800 dark:bg-slate-800/50 sm:px-7">
-              <div className="text-[11px] text-slate-400 dark:text-slate-500 text-center sm:text-left">
-                Puedes reabrir esta guía con el botón <strong className="text-slate-600 dark:text-slate-300">Guía</strong> en la barra superior.
+              <div className="text-[11px] text-slate-600 dark:text-slate-400 text-center sm:text-left">
+                Puedes reabrir esta guía con el botón <strong className="text-slate-700 dark:text-slate-300">Guía</strong> en la barra superior.
               </div>
 
               <div className="flex items-center justify-end gap-2">

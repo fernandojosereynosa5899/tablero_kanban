@@ -15,6 +15,8 @@ import {
 } from './middleware/maintenance';
 import { globalApiLimiter, mutationApiLimiter } from './middleware/rateLimit';
 import { sanitizeInputMiddleware, securityHeadersMiddleware } from './middleware/security';
+import { HttpError } from './utils/errors';
+import { requestLoggerMiddleware } from './utils/logger';
 import { attachmentsRouter } from './routes/attachments';
 import { setupSocketIO } from './realtime/socket';
 import { activityRouter } from './routes/activity';
@@ -71,6 +73,7 @@ export function createServer() {
     }),
   );
   app.use(securityHeadersMiddleware);
+  app.use(requestLoggerMiddleware);
   app.use(
     compression({
       filter: (req, res) => {
@@ -89,7 +92,7 @@ export function createServer() {
           callback(null, true);
           return;
         }
-        callback(new Error('Origen no permitido por CORS'));
+        callback(new HttpError(403, 'Origen no permitido por CORS'));
       },
       credentials: true,
       exposedHeaders: ['Content-Disposition', 'ETag'],

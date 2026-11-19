@@ -446,13 +446,26 @@ export async function updateSubtask(actor: User, subtaskId: string, input: Updat
       where: { id: subtaskId },
       include: {
         task: {
-          select: { id: true, title: true, assigneeId: true, assignedToAll: true },
+          select: { id: true, title: true, status: true, assigneeId: true, assignedToAll: true },
         },
       },
     });
 
     if (!subtask) {
       throw new HttpError(404, 'Subtarea no encontrada');
+    }
+
+    if (subtask.task.status === TaskStatus.APPROVED && actor.role !== Role.LEADER) {
+      void recordSecurityEvent({
+        userId: actor.id,
+        username: actor.username,
+        eventType: 'unauthorized_action',
+        details: { action: 'updateSubtask:APPROVED', subtaskId, taskId: subtask.taskId },
+      });
+      throw new HttpError(
+        403,
+        buildForbiddenMessage(actor, 'No puedes modificar subtareas de una tarea ya aprobada'),
+      );
     }
 
     if (input.title !== undefined && actor.role !== Role.LEADER) {

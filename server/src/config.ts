@@ -40,7 +40,7 @@ const rawMaintenanceEta = process.env.MAINTENANCE_ETA_MINUTES?.trim() ?? '';
 const parsedMaintenanceEta = rawMaintenanceEta ? Number(rawMaintenanceEta) : NaN;
 const smtpUser = process.env.SMTP_USER?.trim() || '';
 const smtpPass = process.env.SMTP_PASS?.trim() || '';
-function normalizeOrigin(raw: string): string {
+export function normalizeOrigin(raw: string): string {
   const trimmed = raw.trim().replace(/\/+$/, '');
   if (!trimmed) return '';
   if (trimmed.includes('*')) {
@@ -57,7 +57,7 @@ function normalizeOrigin(raw: string): string {
   return trimmed;
 }
 
-function compileOriginWildcard(pattern: string): RegExp | null {
+export function compileOriginWildcard(pattern: string): RegExp | null {
   if (!pattern.includes('*')) return null;
   const match = /^(https?):\/\/([a-z0-9*.-]+)(:\d+)?$/i.exec(pattern);
   if (!match) return null;
@@ -73,49 +73,72 @@ function compileOriginWildcard(pattern: string): RegExp | null {
   return new RegExp(`^${protocol.toLowerCase()}:\\/\\/${escapedHost}${escapedPort}$`, 'i');
 }
 
-const clientOrigin = normalizeOrigin(process.env.CLIENT_ORIGIN ?? '') || 'http://localhost:5173';
-const renderExternalUrl = normalizeOrigin(process.env.RENDER_EXTERNAL_URL ?? '');
-const extraAllowedOrigins = (process.env.ALLOWED_ORIGINS ?? '')
-  .split(',')
-  .map((item) => normalizeOrigin(item))
-  .filter(Boolean);
+export interface OriginMatcherOptions {
+  isProd: boolean;
+  clientOrigin?: string;
+  allowedOrigins?: string;
+  renderExternalUrl?: string;
+}
 
-const rawAllowedEntries = [
-  'https://tablero-kanban.onrender.com',
-  clientOrigin,
-  ...extraAllowedOrigins,
-  ...(renderExternalUrl ? [renderExternalUrl] : []),
-];
+export function createOriginMatcher(options: OriginMatcherOptions): (origin: string | undefined) => boolean {
+  const resolvedClientOrigin = normalizeOrigin(options.clientOrigin ?? '') || 'http://localhost:5173';
+  const resolvedRenderExternalUrl = normalizeOrigin(options.renderExternalUrl ?? '');
+  const extraAllowedOrigins = (options.allowedOrigins ?? '')
+    .split(',')
+    .map((item) => normalizeOrigin(item))
+    .filter(Boolean);
 
-const prodAllowedOrigins = new Set<string>(
-  rawAllowedEntries.filter((entry) => !entry.includes('*')),
-);
-const prodAllowedOriginPatterns = rawAllowedEntries
-  .map((entry) => compileOriginWildcard(entry))
-  .filter((re): re is RegExp => re !== null);
+  const rawAllowedEntries = [
+    'https://tablero-kanban.onrender.com',
+    resolvedClientOrigin,
+    ...extraAllowedOrigins,
+    ...(resolvedRenderExternalUrl ? [resolvedRenderExternalUrl] : []),
+  ];
 
-export function isOriginAllowed(origin: string | undefined): boolean {
-  if (!origin) return true;
-  const normalized = normalizeOrigin(origin);
-  if (!normalized) return true;
-  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
-    return true;
-  }
-  if (isProd) {
-    if (prodAllowedOrigins.has(normalized)) return true;
-    if (prodAllowedOriginPatterns.some((re) => re.test(normalized))) return true;
-    // Permite el dominio propio del servicio en Render (*.onrender.com con HTTPS)
-    if (/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.onrender\.com$/i.test(normalized)) {
+  const prodAllowedOrigins = new Set<string>(
+    rawAllowedEntries.filter((entry) => !entry.includes('*')),
+  );
+  const prodAllowedOriginPatterns = rawAllowedEntries
+    .map((entry) => compileOriginWildcard(entry))
+    .filter((re): re is RegExp => re !== null);
+
+  return (origin: string | undefined): boolean => {
+    if (!origin) return true;
+    const normalized = normalizeOrigin(origin);
+    if (!normalized) return true;
+    if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(normalized)) {
       return true;
     }
-    return false;
-  }
-  return (
-    normalized === clientOrigin ||
-    prodAllowedOrigins.has(normalized) ||
-    prodAllowedOriginPatterns.some((re) => re.test(normalized))
+    if (options.isProd) {
+      if (prodAllowedOrigins.has(normalized)) return true;
+      if (prodAllowedOriginPatterns.some((re) => re.test(normalized))) return true;
+      // Permite el dominio propio del servicio en Render (*.onrender.com con HTTPS)
+      if (/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.onrender\.com$/i.test(normalized)) {
+        return true;
+      }
+      return false;
+    }
+    return (
+      normalized === resolvedClientOrigin ||
+      prodAllowedOrigins.has(normalized) ||
+      prodAllowedOriginPatterns.some((re) => re.test(normalized))
+    );
+  };
+}
+
+const clientOrigin = normalizeOrigin(process.env.CLIENT_ORIGIN ?? '') || 'http://localhost:5173';
+if (isProd && !process.env.CLIENT_ORIGIN?.trim()) {
+  console.warn(
+    '[tablero-kanban-server] Advertencia: CLIENT_ORIGIN no está definido en producción; solo se permitirán orígenes locales, *.onrender.com y ALLOWED_ORIGINS.',
   );
 }
+
+export const isOriginAllowed = createOriginMatcher({
+  isProd,
+  clientOrigin: process.env.CLIENT_ORIGIN,
+  allowedOrigins: process.env.ALLOWED_ORIGINS,
+  renderExternalUrl: process.env.RENDER_EXTERNAL_URL,
+});
 
 export const config = {
   port: Number.isFinite(parsedPort) && parsedPort > 0 ? parsedPort : 3000,

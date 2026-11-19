@@ -35,11 +35,16 @@ function cleanupExpired(store: Map<string, Bucket>, now: number): void {
 }
 
 export function getClientIp(req: Request): string {
-  const xff = req.headers['x-forwarded-for'];
-  if (typeof xff === 'string' && xff.trim().length > 0) {
-    return xff.split(',')[0].trim();
+  const rawIp = typeof req.ip === 'string' ? req.ip.trim() : '';
+  if (rawIp.length > 0) {
+    return rawIp.startsWith('::ffff:') ? rawIp.slice(7) : rawIp;
   }
-  return req.ip || req.socket.remoteAddress || 'unknown';
+  const remote =
+    typeof req.socket?.remoteAddress === 'string' ? req.socket.remoteAddress.trim() : '';
+  if (remote.length > 0) {
+    return remote.startsWith('::ffff:') ? remote.slice(7) : remote;
+  }
+  return 'unknown';
 }
 
 export function createRateLimiter(options: RateLimitOptions) {
@@ -110,7 +115,7 @@ export const securityReportLimiter = createRateLimiter({
 export const uploadApiLimiter = createRateLimiter({
   keyPrefix: 'attachment-upload',
   windowMs: 60_000,
-  max: 20,
+  max: 60,
   message: 'Límite de subida de archivos por minuto alcanzado. Espera un momento.',
   keyGenerator: (req) => req.user?.id ?? getClientIp(req),
 });
@@ -183,4 +188,9 @@ export function allowSocketTypingEvent(socketId: string): boolean {
   }
   bucket.count += 1;
   return bucket.count <= SOCKET_TYPING_MAX;
+}
+
+export function clearSocketRateLimits(socketId: string): void {
+  socketStore.delete(socketId);
+  socketTypingStore.delete(socketId);
 }

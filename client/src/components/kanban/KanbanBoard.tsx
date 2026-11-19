@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import {
   DndContext,
   DragOverlay,
@@ -37,6 +37,8 @@ const collisionDetectionStrategy: CollisionDetection = (args) => {
   }
   return closestCorners(args);
 };
+
+const noopOpenDetail = () => {};
 
 export function KanbanBoard({
   allTasks,
@@ -195,6 +197,13 @@ export function KanbanBoard({
     void onMoveTask(draggedTask, targetStatus, nextPosition);
   };
 
+  const handleQuickMove = useCallback(
+    (task: Task, toStatus: TaskStatus) => {
+      void onMoveTask(task, toStatus);
+    },
+    [onMoveTask],
+  );
+
   return (
     <DndContext
       sensors={sensors}
@@ -231,6 +240,7 @@ export function KanbanBoard({
             {KANBAN_COLUMNS.map((col) => {
               const count = groupedFiltered[col.status].length;
               const isSelected = !mobileShowAll && mobileActiveStatus === col.status;
+
               return (
                 <button
                   key={col.status}
@@ -263,10 +273,9 @@ export function KanbanBoard({
                     <span className="truncate">{col.label}</span>
                   </span>
                   <span
-                    className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none"
+                    className="shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-bold leading-none text-slate-800 dark:text-slate-100"
                     style={{
-                      backgroundColor: `${col.color}22`,
-                      color: col.color,
+                      backgroundColor: `${col.color}28`,
                     }}
                   >
                     {count}
@@ -289,9 +298,7 @@ export function KanbanBoard({
               isDraggingActive={activeTaskId !== null}
               hiddenOnMobile={!mobileShowAll && column.status !== mobileActiveStatus}
               onOpenDetail={onOpenDetail}
-              onQuickMove={(task, toStatus) => {
-                void onMoveTask(task, toStatus);
-              }}
+              onQuickMove={handleQuickMove}
               onCreateInColumn={onCreateInColumn}
             />
           ))}
@@ -305,7 +312,7 @@ export function KanbanBoard({
               task={activeTask}
               currentUserId={currentUserId}
               currentUserRole={currentUserRole}
-              onOpenDetail={() => {}}
+              onOpenDetail={noopOpenDetail}
               isOverlay
             />
           </div>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type DragEvent } from 'react';
 import {
   Cloud,
   Download,
@@ -16,6 +16,7 @@ import {
   X,
 } from 'lucide-react';
 import { toast } from 'sonner';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { api, ApiError } from '../../lib/api';
 import type { AttachmentStorageStats, Task, TaskAttachment } from '../../types/kanban';
 import {
@@ -101,6 +102,7 @@ export function TaskAttachmentsSection({
   onStorageStatsRefresh,
 }: TaskAttachmentsSectionProps) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const lightboxRef = useRef<HTMLDivElement | null>(null);
   const [dragging, setDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
@@ -121,9 +123,14 @@ export function TaskAttachmentsSection({
     };
   }, [previewModal]);
 
-  const closePreview = () => {
+  const closePreview = useCallback(() => {
     setPreviewModal(null);
-  };
+  }, []);
+
+  useFocusTrap(lightboxRef, {
+    enabled: Boolean(previewModal),
+    onClose: closePreview,
+  });
 
   const isDriveMode = storageStats?.storageMode === 'gdrive';
   const dbUsedBytes = storageStats
@@ -446,12 +453,12 @@ export function TaskAttachmentsSection({
 
       {/* Lista de archivos */}
       {loading ? (
-        <div className="flex items-center gap-2 py-3 text-xs text-slate-500">
+        <div className="flex items-center gap-2 py-3 text-xs text-slate-600 dark:text-slate-400">
           <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
           Cargando archivos adjuntos...
         </div>
       ) : attachments.length === 0 ? (
-        <p className="text-xs text-slate-400 dark:text-slate-500">
+        <p className="text-xs text-slate-600 dark:text-slate-400">
           No hay archivos adjuntos en esta actividad todavía.
         </p>
       ) : (
@@ -564,7 +571,7 @@ export function TaskAttachmentsSection({
                         onClick={() => setConfirmDeleteId(att.id)}
                         title="Eliminar archivo"
                         aria-label={`Eliminar archivo ${att.originalName}`}
-                        className="inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg p-1.5 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
+                        className="inline-flex min-h-[32px] min-w-[32px] items-center justify-center rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-50 hover:text-rose-600 dark:text-slate-400 dark:hover:bg-rose-950/40 dark:hover:text-rose-400"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -584,12 +591,19 @@ export function TaskAttachmentsSection({
           className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-xs"
         >
           <div
+            ref={lightboxRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="attachment-preview-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
-            className="flex max-h-[90vh] max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl"
+            className="flex max-h-[90vh] w-full sm:w-auto max-w-3xl flex-col overflow-hidden rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl focus:outline-none"
           >
             <div className="flex items-center justify-between gap-3 border-b border-slate-800 px-4 py-3 text-white">
               <div className="min-w-0">
-                <p className="truncate text-sm font-semibold">{previewModal.attachment.originalName}</p>
+                <p id="attachment-preview-title" className="truncate text-sm font-semibold">
+                  {previewModal.attachment.originalName}
+                </p>
                 <p className="text-[11px] text-slate-400">
                   {formatBytes(previewModal.attachment.sizeBytes)} · Subido por{' '}
                   {previewModal.attachment.uploadedBy?.displayName ?? 'Usuario'}

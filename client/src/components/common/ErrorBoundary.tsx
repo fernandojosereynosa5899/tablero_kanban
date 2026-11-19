@@ -30,8 +30,7 @@ export class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundarySt
 
   handleResetStorage = (): void => {
     try {
-      window.localStorage.clear();
-      window.sessionStorage.clear();
+      window.localStorage.removeItem('kanban_token');
     } catch {
       // Ignorar si el almacenamiento está restringido
     }

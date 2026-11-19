@@ -6,6 +6,28 @@ export function getRoleLabel(role: Role): string {
   return 'Integrante';
 }
 
+export function getMaintenanceSourceLabel(source: MaintenanceSource): string {
+  switch (source) {
+    case 'env':
+      return 'Render / Env';
+    case 'file':
+      return 'Despliegue / Push';
+    case 'database':
+      return 'Líder en vivo';
+    default:
+      return 'Sistema';
+  }
+}
+
+export function canUserMoveTask(
+  task: Pick<Task, 'assignedToAll' | 'assigneeId' | 'status'>,
+  userId: string,
+  role: Role,
+): boolean {
+  if (role === 'LEADER') return true;
+  return (task.assignedToAll || task.assigneeId === userId) && task.status !== 'APPROVED';
+}
+
 export type TaskStatus = 'TODO' | 'IN_PROGRESS' | 'DONE' | 'APPROVED';
 
 export type Priority = 'LOW' | 'MEDIUM' | 'HIGH' | 'URGENT';
@@ -14,12 +36,26 @@ export const MAX_USERS = 6;
 export const PROJECT_DATE_MIN = '2026-11-07';
 export const PROJECT_DATE_MAX = '2026-12-19';
 
+export function getDueDateLocalEndOfDayMs(iso: string): number | null {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return new Date(
+    parsed.getUTCFullYear(),
+    parsed.getUTCMonth(),
+    parsed.getUTCDate(),
+    23,
+    59,
+    59,
+    999,
+  ).getTime();
+}
+
 export function isTaskIncompleteOverdue(task: Pick<Task, 'dueDate' | 'status'>, nowMs = Date.now()): boolean {
   if (!task.dueDate) return false;
   if (task.status === 'DONE' || task.status === 'APPROVED') return false;
-  const dueMs = Date.parse(task.dueDate);
-  if (Number.isNaN(dueMs)) return false;
-  return dueMs < nowMs;
+  const endOfDayMs = getDueDateLocalEndOfDayMs(task.dueDate);
+  if (endOfDayMs === null) return false;
+  return endOfDayMs < nowMs;
 }
 
 export const AVATAR_ACCESSORIES = [

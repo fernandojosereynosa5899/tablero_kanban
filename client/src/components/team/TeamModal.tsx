@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { api, ApiError } from '../../lib/api';
 import {
   AVATAR_ACCESSORIES,
@@ -60,6 +61,12 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
   const [showPassword, setShowPassword] = useState(false);
   const [avatar, setAvatar] = useState<AvatarConfig>(DEFAULT_AVATAR);
   const [submitting, setSubmitting] = useState(false);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useFocusTrap(dialogRef, {
+    enabled: open && Boolean(user && user.role === 'LEADER'),
+    onClose,
+  });
 
   const onlineSet = useMemo(() => new Set(onlineUserIds), [onlineUserIds]);
 
@@ -81,15 +88,6 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
       setAvatar(DEFAULT_AVATAR);
     }
   }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
 
   if (!user || user.role !== 'LEADER') return null;
 
@@ -135,8 +133,8 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
       toast.error('El nombre visible debe tener entre 2 y 50 caracteres.');
       return;
     }
-    if (password.length < 6) {
-      toast.error('La contraseña inicial debe tener al menos 6 caracteres.');
+    if (password.length < 8) {
+      toast.error('La contraseña inicial debe tener al menos 8 caracteres.');
       return;
     }
 
@@ -198,8 +196,8 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
 
   const handleResetPassword = async (event: FormEvent<HTMLFormElement>, member: UserPublic) => {
     event.preventDefault();
-    if (password.length < 6) {
-      toast.error('La nueva contraseña debe tener al menos 6 caracteres.');
+    if (password.length < 8) {
+      toast.error('La nueva contraseña debe tener al menos 8 caracteres.');
       return;
     }
 
@@ -241,10 +239,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
         <VectorAvatar avatar={avatar} size={48} />
         <div className="grid flex-1 grid-cols-1 sm:grid-cols-2 gap-2">
           <div>
-            <label className="mb-1 block text-[11px] font-semibold text-slate-500">
+            <label
+              htmlFor="team-avatar-preset"
+              className="mb-1 block text-[11px] font-semibold text-slate-600 dark:text-slate-400"
+            >
               Personaje SVG
             </label>
             <select
+              id="team-avatar-preset"
               value={avatar.preset}
               onChange={(e) => setAvatar((prev) => ({ ...prev, preset: e.target.value }))}
               className="w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-800 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-100"
@@ -257,10 +259,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
             </select>
           </div>
           <div>
-            <label className="mb-1 block text-[11px] font-semibold text-slate-500">
+            <label
+              htmlFor="team-avatar-accessory"
+              className="mb-1 block text-[11px] font-semibold text-slate-600 dark:text-slate-400"
+            >
               Accesorio
             </label>
             <select
+              id="team-avatar-accessory"
               value={avatar.accessory}
               onChange={(e) =>
                 setAvatar((prev) => ({
@@ -281,8 +287,10 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5">
-          <span className="text-[11px] font-semibold text-slate-500 mr-1">Fondo:</span>
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 mr-1">
+            Fondo:
+          </span>
           {AVATAR_BG_PALETTE.slice(0, 7).map((hex) => {
             const active = avatar.bg.toLowerCase() === hex.toLowerCase();
             return (
@@ -303,7 +311,9 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
         </div>
 
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] font-semibold text-slate-500 mr-1">Color:</span>
+          <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 mr-1">
+            Color:
+          </span>
           {AVATAR_COLOR_PALETTE.slice(0, 6).map((hex) => {
             const active = avatar.color.toLowerCase() === hex.toLowerCase();
             return (
@@ -339,6 +349,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
           onClick={onClose}
         >
           <motion.div
+            ref={dialogRef}
             key="team-modal-dialog"
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -347,8 +358,9 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
             role="dialog"
             aria-modal="true"
             aria-labelledby="team-modal-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
-            className="relative flex max-h-[90dvh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            className="relative flex max-h-[90dvh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl focus:outline-none dark:border-slate-800 dark:bg-slate-900"
           >
             {/* Cabecera */}
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3.5 sm:px-7 sm:py-4 dark:border-slate-800">
@@ -373,7 +385,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                 type="button"
                 onClick={onClose}
                 aria-label="Cerrar panel de equipo"
-                className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -398,6 +410,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                   return (
                     <div
                       key={slotNumber}
+                      data-slot={slotNumber}
                       className="rounded-2xl border border-slate-200/90 bg-slate-50/60 p-4 dark:border-slate-800 dark:bg-slate-800/40"
                     >
                       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -429,7 +442,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                                 className={
                                   isOnline
                                     ? 'font-semibold text-emerald-600 dark:text-emerald-400'
-                                    : 'text-slate-400'
+                                    : 'text-slate-600 dark:text-slate-400'
                                 }
                               >
                                 {isOnline ? 'En línea ahora' : 'Desconectado'}
@@ -445,7 +458,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                               onClose();
                               onOpenMyProfile();
                             }}
-                            className="inline-flex items-center gap-1.5 self-start sm:self-auto rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/15 dark:text-blue-300"
+                            className="inline-flex min-h-[36px] items-center gap-1.5 self-start sm:self-auto rounded-xl border border-blue-200 bg-blue-50 px-3 py-1.5 text-xs font-semibold text-blue-700 transition hover:bg-blue-100 dark:border-blue-500/30 dark:bg-blue-500/15 dark:text-blue-300"
                           >
                             <Edit3 className="h-3.5 w-3.5" />
                             Editar en Mi Perfil
@@ -516,10 +529,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                         >
                           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                             <div>
-                              <label className="mb-1 block text-[11px] font-bold uppercase text-slate-500">
+                              <label
+                                htmlFor={`team-edit-username-${occupant.id}`}
+                                className="mb-1 block text-[11px] font-bold uppercase text-slate-600 dark:text-slate-300"
+                              >
                                 Clave de usuario
                               </label>
                               <input
+                                id={`team-edit-username-${occupant.id}`}
                                 type="text"
                                 value={username}
                                 onChange={(e) => setUsername(e.target.value)}
@@ -529,10 +546,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                               />
                             </div>
                             <div>
-                              <label className="mb-1 block text-[11px] font-bold uppercase text-slate-500">
+                              <label
+                                htmlFor={`team-edit-displayname-${occupant.id}`}
+                                className="mb-1 block text-[11px] font-bold uppercase text-slate-600 dark:text-slate-300"
+                              >
                                 Nombre visible
                               </label>
                               <input
+                                id={`team-edit-displayname-${occupant.id}`}
                                 type="text"
                                 value={displayName}
                                 onChange={(e) => setDisplayName(e.target.value)}
@@ -549,14 +570,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                             <button
                               type="button"
                               onClick={() => setActionMode({ type: 'none' })}
-                              className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                              className="inline-flex min-h-[36px] items-center rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                             >
                               Cancelar
                             </button>
                             <button
                               type="submit"
                               disabled={submitting}
-                              className="inline-flex items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-65"
+                              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-blue-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:opacity-65"
                             >
                               {submitting ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -583,43 +604,52 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                             </span>
                           </div>
 
-                          <div className="flex flex-col sm:flex-row gap-2">
-                            <div className="relative flex-1">
-                              <input
-                                type={showPassword ? 'text' : 'password'}
-                                value={password}
-                                onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Nueva contraseña (mínimo 6 caracteres)"
-                                minLength={6}
-                                required
-                                className="w-full rounded-xl border border-slate-300 bg-white px-3 pr-9 py-2 text-xs sm:text-sm text-slate-900 outline-none focus:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
-                              />
-                              <button
-                                type="button"
-                                onClick={() => setShowPassword((p) => !p)}
-                                aria-label="Mostrar u ocultar contraseña"
-                                className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                          <div className="flex flex-col sm:flex-row sm:items-end gap-2">
+                            <div className="flex-1">
+                              <label
+                                htmlFor={`team-reset-password-${occupant.id}`}
+                                className="mb-1 block text-[11px] font-bold uppercase text-slate-600 dark:text-slate-300"
                               >
-                                {showPassword ? (
-                                  <EyeOff className="h-4 w-4" />
-                                ) : (
-                                  <Eye className="h-4 w-4" />
-                                )}
-                              </button>
+                                Nueva contraseña (mínimo 8 caracteres)
+                              </label>
+                              <div className="relative">
+                                <input
+                                  id={`team-reset-password-${occupant.id}`}
+                                  type={showPassword ? 'text' : 'password'}
+                                  value={password}
+                                  onChange={(e) => setPassword(e.target.value)}
+                                  placeholder="Nueva contraseña (mínimo 8 caracteres)"
+                                  minLength={8}
+                                  required
+                                  className="w-full rounded-xl border border-slate-300 bg-white px-3 pr-9 py-2 text-xs sm:text-sm text-slate-900 outline-none focus:border-amber-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => setShowPassword((p) => !p)}
+                                  aria-label="Mostrar u ocultar contraseña"
+                                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
+                                >
+                                  {showPassword ? (
+                                    <EyeOff className="h-4 w-4" />
+                                  ) : (
+                                    <Eye className="h-4 w-4" />
+                                  )}
+                                </button>
+                              </div>
                             </div>
 
                             <div className="flex gap-2">
                               <button
                                 type="button"
                                 onClick={() => setActionMode({ type: 'none' })}
-                                className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                                className="inline-flex min-h-[36px] items-center rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                               >
                                 Cancelar
                               </button>
                               <button
                                 type="submit"
                                 disabled={submitting}
-                                className="inline-flex items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-65"
+                                className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-amber-600 px-4 py-2 text-xs font-semibold text-white hover:bg-amber-700 disabled:opacity-65"
                               >
                                 {submitting ? (
                                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -644,7 +674,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                             <button
                               type="button"
                               onClick={() => setActionMode({ type: 'none' })}
-                              className="rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                              className="inline-flex min-h-[36px] items-center rounded-lg border border-slate-300 bg-white px-3 py-1 text-xs font-semibold text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
                             >
                               Cancelar
                             </button>
@@ -652,7 +682,7 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                               type="button"
                               disabled={submitting}
                               onClick={() => void handleDeleteMember(occupant)}
-                              className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-65"
+                              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1 text-xs font-semibold text-white hover:bg-red-700 disabled:opacity-65"
                             >
                               {submitting ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -673,18 +703,19 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                 return (
                   <div
                     key={slotNumber}
+                    data-slot={slotNumber}
                     className="rounded-2xl border border-dashed border-slate-300 bg-slate-50/40 p-4 dark:border-slate-700 dark:bg-slate-800/20"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3">
                       <div className="flex items-center gap-3">
-                        <div className="flex h-11 w-11 items-center justify-center rounded-full border border-dashed border-slate-300 bg-white text-xs font-bold text-slate-400 dark:border-slate-700 dark:bg-slate-900">
+                        <div className="flex h-11 w-11 items-center justify-center rounded-full border border-dashed border-slate-300 bg-white text-xs font-bold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
                           #{slotNumber}
                         </div>
                         <div>
                           <p className="text-sm font-bold text-slate-700 dark:text-slate-200">
                             Cupo #{slotNumber} disponible
                           </p>
-                          <p className="text-xs text-slate-400">
+                          <p className="text-xs text-slate-600 dark:text-slate-400">
                             Espacio libre para un nuevo integrante del equipo
                           </p>
                         </div>
@@ -711,10 +742,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                       >
                         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                           <div>
-                            <label className="mb-1 block text-[11px] font-bold uppercase text-slate-500">
+                            <label
+                              htmlFor={`team-create-username-${slotNumber}`}
+                              className="mb-1 block text-[11px] font-bold uppercase text-slate-600 dark:text-slate-300"
+                            >
                               Clave de usuario *
                             </label>
                             <input
+                              id={`team-create-username-${slotNumber}`}
                               type="text"
                               value={username}
                               onChange={(e) => setUsername(e.target.value)}
@@ -726,10 +761,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                           </div>
 
                           <div>
-                            <label className="mb-1 block text-[11px] font-bold uppercase text-slate-500">
+                            <label
+                              htmlFor={`team-create-displayname-${slotNumber}`}
+                              className="mb-1 block text-[11px] font-bold uppercase text-slate-600 dark:text-slate-300"
+                            >
                               Nombre visible *
                             </label>
                             <input
+                              id={`team-create-displayname-${slotNumber}`}
                               type="text"
                               value={displayName}
                               onChange={(e) => setDisplayName(e.target.value)}
@@ -741,24 +780,28 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                           </div>
 
                           <div>
-                            <label className="mb-1 block text-[11px] font-bold uppercase text-slate-500">
+                            <label
+                              htmlFor={`team-create-password-${slotNumber}`}
+                              className="mb-1 block text-[11px] font-bold uppercase text-slate-600 dark:text-slate-300"
+                            >
                               Contraseña inicial *
                             </label>
                             <div className="relative">
                               <input
+                                id={`team-create-password-${slotNumber}`}
                                 type={showPassword ? 'text' : 'password'}
                                 value={password}
                                 onChange={(e) => setPassword(e.target.value)}
-                                placeholder="Mínimo 6 caracteres"
+                                placeholder="Mínimo 8 caracteres"
                                 required
-                                minLength={6}
+                                minLength={8}
                                 className="w-full rounded-xl border border-slate-300 bg-white px-3 pr-8 py-2 text-xs sm:text-sm text-slate-900 outline-none focus:border-indigo-500 dark:border-slate-700 dark:bg-slate-900 dark:text-white"
                               />
                               <button
                                 type="button"
                                 onClick={() => setShowPassword((p) => !p)}
                                 aria-label="Mostrar u ocultar contraseña"
-                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
                               >
                                 {showPassword ? (
                                   <EyeOff className="h-4 w-4" />
@@ -776,14 +819,14 @@ export function TeamModal({ open, onClose, onOpenMyProfile }: TeamModalProps) {
                           <button
                             type="button"
                             onClick={() => setActionMode({ type: 'none' })}
-                            className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
+                            className="inline-flex min-h-[36px] items-center rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-300"
                           >
                             Cancelar
                           </button>
                           <button
                             type="submit"
                             disabled={submitting}
-                            className="inline-flex items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-65"
+                            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-indigo-600 px-4 py-1.5 text-xs font-semibold text-white hover:bg-indigo-700 disabled:opacity-65"
                           >
                             {submitting ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />

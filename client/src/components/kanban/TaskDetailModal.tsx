@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -11,6 +11,7 @@ import {
   Lock,
   MessageSquare,
   Plus,
+  RefreshCw,
   Send,
   Square,
   Trash2,
@@ -19,6 +20,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { api, ApiError } from '../../lib/api';
 import type {
   AttachmentCreatedPayload,
@@ -104,7 +106,18 @@ export function TaskDetailModal({
   onEditTask,
   onMoveTask,
 }: TaskDetailModalProps) {
-  const { user, tasks, setTasks, socket } = useAuth();
+  const {
+    user,
+    tasks,
+    setTasks,
+    socket,
+    registerCommentCreated,
+    registerCommentDeleted,
+    registerAttachmentCreated,
+    registerAttachmentDeleted,
+  } = useAuth();
+
+  const dialogRef = useRef<HTMLDivElement | null>(null);
 
   const task = useMemo(
     () => (taskId ? tasks.find((t) => t.id === taskId) ?? null : null),
@@ -115,6 +128,7 @@ export function TaskDetailModal({
   const [attachments, setAttachments] = useState<TaskAttachment[]>([]);
   const [storageStats, setStorageStats] = useState<AttachmentStorageStats | null>(null);
   const [loadingComments, setLoadingComments] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [commentDraft, setCommentDraft] = useState('');
   const [postingComment, setPostingComment] = useState(false);
   const [deletingCommentId, setDeletingCommentId] = useState<string | null>(null);
@@ -143,45 +157,56 @@ export function TaskDetailModal({
     }
   }, [taskId, task, onClose]);
 
+  const loadTaskDetail = useCallback(
+    (targetTaskId: string, isCancelled?: () => boolean) => {
+      setLoadingComments(true);
+      setDetailError(null);
+
+      api
+        .getTask(targetTaskId)
+        .then((detail) => {
+          if (isCancelled?.()) return;
+          setComments((prev) => mergeComments(prev, detail.comments));
+          setAttachments((prev) => mergeAttachments(prev, detail.attachments ?? []));
+          // Sincronizar versión fresca sin perder orden
+          const {
+            comments: _ignoredComments,
+            attachments: _ignoredAttachments,
+            ...freshTask
+          } = detail;
+          setTasks((prev) => prev.map((t) => (t.id === freshTask.id ? freshTask : t)));
+        })
+        .catch((err) => {
+          if (isCancelled?.()) return;
+          const msg = err instanceof ApiError ? err.message : 'No se pudo cargar la tarea';
+          setDetailError(msg);
+          toast.error(msg);
+        })
+        .finally(() => {
+          if (!isCancelled?.()) setLoadingComments(false);
+        });
+    },
+    [setTasks],
+  );
+
   // Cargar detalle, adjuntos y comentarios al abrir
   useEffect(() => {
     if (!taskId) {
       setComments([]);
       setAttachments([]);
       setTypingUsers({});
+      setDetailError(null);
       return;
     }
     let active = true;
     setComments([]);
     setAttachments([]);
     setTypingUsers({});
-    setLoadingComments(true);
     setConfirmDeleteOpen(false);
     setCommentDraft('');
     setNewSubtaskTitle('');
 
-    api
-      .getTask(taskId)
-      .then((detail) => {
-        if (!active) return;
-        setComments((prev) => mergeComments(prev, detail.comments));
-        setAttachments((prev) => mergeAttachments(prev, detail.attachments ?? []));
-        // Sincronizar versión fresca sin perder orden
-        const {
-          comments: _ignoredComments,
-          attachments: _ignoredAttachments,
-          ...freshTask
-        } = detail;
-        setTasks((prev) => prev.map((t) => (t.id === freshTask.id ? freshTask : t)));
-      })
-      .catch((err) => {
-        if (!active) return;
-        const msg = err instanceof ApiError ? err.message : 'No se pudo cargar la tarea';
-        toast.error(msg);
-      })
-      .finally(() => {
-        if (active) setLoadingComments(false);
-      });
+    loadTaskDetail(taskId, () => !active);
 
     api
       .getAttachmentStorageStats()
@@ -195,7 +220,7 @@ export function TaskDetailModal({
     return () => {
       active = false;
     };
-  }, [taskId, setTasks]);
+  }, [taskId, loadTaskDetail]);
 
   // Escuchar comentarios y estado de escritura simultánea en tiempo real
   useEffect(() => {
@@ -286,14 +311,10 @@ export function TaskDetailModal({
     };
   }, [socket, taskId, user?.id]);
 
-  useEffect(() => {
-    if (!taskId) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [taskId, onClose]);
+  useFocusTrap(dialogRef, {
+    enabled: Boolean(taskId && task),
+    onClose,
+  });
 
   if (!user) return null;
 
@@ -410,6 +431,7 @@ export function TaskDetailModal({
     try {
       const created = await api.createComment(task.id, clean);
       setComments((prev) => mergeComments(prev, [created]));
+      registerCommentCreated(task.id, created.id);
       setCommentDraft('');
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'No se pudo publicar el comentario';
@@ -420,10 +442,12 @@ export function TaskDetailModal({
   };
 
   const handleDeleteComment = async (commentId: string) => {
+    if (!task) return;
     setDeletingCommentId(commentId);
     try {
       await api.deleteComment(commentId);
       setComments((prev) => prev.filter((c) => c.id !== commentId));
+      registerCommentDeleted(task.id, commentId);
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : 'No se pudo eliminar el comentario';
       toast.error(msg);
@@ -455,10 +479,7 @@ export function TaskDetailModal({
   const activeTypingNames = Object.values(typingUsers)
     .filter((t) => t.expiresAt > Date.now())
     .map((t) => t.displayName);
-  const isOverdue =
-    task?.dueDate &&
-    new Date(task.dueDate).getTime() < Date.now() &&
-    task.status !== 'APPROVED';
+  const isOverdue = task ? isTaskIncompleteOverdue(task) : false;
 
   return (
     <AnimatePresence>
@@ -473,6 +494,7 @@ export function TaskDetailModal({
           onClick={onClose}
         >
           <motion.div
+            ref={dialogRef}
             key="task-detail-dialog"
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -481,8 +503,9 @@ export function TaskDetailModal({
             role="dialog"
             aria-modal="true"
             aria-labelledby="task-detail-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
-            className="relative flex max-h-[90dvh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            className="relative flex max-h-[90dvh] w-full max-w-3xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl focus:outline-none dark:border-slate-800 dark:bg-slate-900"
           >
             {/* Banda superior del color post-it */}
             <div style={{ backgroundColor: postItColor }} className="h-2.5 w-full shrink-0" />
@@ -510,7 +533,7 @@ export function TaskDetailModal({
                     </span>
                   ) : null}
 
-                  {isTaskIncompleteOverdue(task) ? (
+                  {isOverdue ? (
                     <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-2.5 py-0.5 text-[11px] font-bold text-rose-800 ring-1 ring-rose-300/80 dark:bg-rose-500/25 dark:text-rose-200 dark:ring-rose-500/40">
                       <AlertTriangle className="h-3.5 w-3.5" />
                       Vencida sin completar
@@ -554,7 +577,7 @@ export function TaskDetailModal({
                   type="button"
                   onClick={onClose}
                   aria-label="Cerrar detalle"
-                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                 >
                   <X className="h-5 w-5" />
                 </button>
@@ -590,6 +613,27 @@ export function TaskDetailModal({
 
             {/* Cuerpo scrollable */}
             <div className="overflow-y-auto p-4 sm:p-7 space-y-5 sm:space-y-6">
+              {detailError ? (
+                <div
+                  role="alert"
+                  className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs sm:text-sm text-rose-800 dark:border-rose-500/35 dark:bg-rose-950/40 dark:text-rose-200"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{detailError}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => loadTaskDetail(task.id)}
+                    disabled={loadingComments}
+                    className="inline-flex min-h-[32px] items-center gap-1.5 rounded-lg border border-rose-300 bg-white px-3 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-500/40 dark:bg-slate-900 dark:text-rose-200 dark:hover:bg-rose-950/60"
+                  >
+                    <RefreshCw className={`h-3.5 w-3.5 ${loadingComments ? 'animate-spin' : ''}`} />
+                    Reintentar
+                  </button>
+                </div>
+              ) : null}
+
               {/* Barra de estado / columnas rápidas + botón destacado Aprobar */}
               <div className="rounded-2xl border border-slate-200/80 bg-slate-50/70 p-3.5 sm:p-4 dark:border-slate-800 dark:bg-slate-800/40 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
@@ -648,7 +692,7 @@ export function TaskDetailModal({
                           isCurrent
                             ? 'text-white shadow-sm'
                             : disabled
-                              ? 'cursor-not-allowed border-slate-200/70 bg-slate-100/70 text-slate-400 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-600'
+                              ? 'cursor-not-allowed border-slate-200/70 bg-slate-100/70 text-slate-600 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-400'
                               : 'border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-100 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:hover:bg-slate-800'
                         }`}
                       >
@@ -678,7 +722,7 @@ export function TaskDetailModal({
                         <Users className="h-5 w-5" />
                       </div>
                       <div className="min-w-0">
-                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
                           Responsable
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
@@ -692,7 +736,7 @@ export function TaskDetailModal({
                     <>
                       <VectorAvatar avatar={task.assignee.avatar} size={42} />
                       <div className="min-w-0">
-                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                        <p className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
                           Responsable
                         </p>
                         <div className="flex flex-wrap items-center gap-2">
@@ -705,10 +749,10 @@ export function TaskDetailModal({
                     </>
                   ) : (
                     <div className="py-1">
-                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                      <p className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
                         Responsable
                       </p>
-                      <p className="text-sm font-semibold text-slate-500 dark:text-slate-400">
+                      <p className="text-sm font-semibold text-slate-600 dark:text-slate-400">
                         Sin asignar
                       </p>
                     </div>
@@ -726,7 +770,7 @@ export function TaskDetailModal({
                     <CalendarClock className="h-5 w-5" />
                   </div>
                   <div className="min-w-0">
-                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
                       Fecha límite
                     </p>
                     <p
@@ -753,7 +797,7 @@ export function TaskDetailModal({
                   {task.description ? (
                     task.description
                   ) : (
-                    <span className="italic text-slate-400 dark:text-slate-500">
+                    <span className="italic text-slate-600 dark:text-slate-400">
                       Sin descripción adicional.
                     </span>
                   )}
@@ -770,7 +814,7 @@ export function TaskDetailModal({
                     </h3>
                   </div>
                   {!canToggleSubtask && totalSubtasks > 0 ? (
-                    <span className="text-[11px] text-slate-400">
+                    <span className="text-[11px] text-slate-600 dark:text-slate-400">
                       Solo el responsable o el líder pueden marcarlas
                     </span>
                   ) : null}
@@ -788,7 +832,7 @@ export function TaskDetailModal({
                 ) : null}
 
                 {task.subtasks.length === 0 ? (
-                  <p className="text-xs text-slate-400 dark:text-slate-500">
+                  <p className="text-xs text-slate-600 dark:text-slate-400">
                     No hay subtareas registradas en esta actividad.
                   </p>
                 ) : (
@@ -814,12 +858,12 @@ export function TaskDetailModal({
                             ) : sub.done ? (
                               <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" />
                             ) : (
-                              <Square className="h-4 w-4 shrink-0 text-slate-400" />
+                              <Square className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" />
                             )}
                             <span
                               className={
                                 sub.done
-                                  ? 'line-through text-slate-400 dark:text-slate-500'
+                                  ? 'line-through text-slate-600 dark:text-slate-400'
                                   : 'font-medium text-slate-800 dark:text-slate-100'
                               }
                             >
@@ -833,7 +877,7 @@ export function TaskDetailModal({
                               disabled={isDeleting}
                               onClick={() => void handleDeleteSubtask(sub.id)}
                               aria-label={`Eliminar subtarea ${sub.title}`}
-                              className="rounded-lg p-1 text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                              className="rounded-lg p-1 text-slate-500 transition hover:bg-red-50 hover:text-red-600 dark:text-slate-400 dark:hover:bg-red-950/40"
                             >
                               {isDeleting ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -886,9 +930,11 @@ export function TaskDetailModal({
                 currentUserId={user.id}
                 onAttachmentAdded={(created) => {
                   setAttachments((prev) => mergeAttachments(prev, [created]));
+                  registerAttachmentCreated(task.id, created.id);
                 }}
                 onAttachmentRemoved={(removedId) => {
                   setAttachments((prev) => prev.filter((a) => a.id !== removedId));
+                  registerAttachmentDeleted(task.id, removedId);
                 }}
                 onStorageStatsRefresh={() => {
                   api
@@ -908,12 +954,12 @@ export function TaskDetailModal({
                 </div>
 
                 {loadingComments ? (
-                  <div className="flex items-center gap-2 py-4 text-xs text-slate-500">
+                  <div className="flex items-center gap-2 py-4 text-xs text-slate-600 dark:text-slate-400">
                     <Loader2 className="h-4 w-4 animate-spin text-blue-500" />
                     Cargando comentarios...
                   </div>
                 ) : comments.length === 0 ? (
-                  <p className="text-xs text-slate-400 dark:text-slate-500">
+                  <p className="text-xs text-slate-600 dark:text-slate-400">
                     Aún no hay comentarios. ¡Sé el primero en dejar una nota!
                   </p>
                 ) : (
@@ -933,7 +979,7 @@ export function TaskDetailModal({
                                 <span className="text-xs font-bold leading-snug text-slate-900 dark:text-white">
                                   {comment.author.displayName}
                                 </span>
-                                <span className="text-[11px] text-slate-400">
+                                <span className="text-[11px] text-slate-600 dark:text-slate-400">
                                   {formatDateTimeEs(comment.createdAt)}
                                 </span>
                               </div>
@@ -944,7 +990,7 @@ export function TaskDetailModal({
                                   disabled={isDeleting}
                                   onClick={() => void handleDeleteComment(comment.id)}
                                   aria-label="Eliminar comentario"
-                                  className="rounded-lg p-1 text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                                  className="rounded-lg p-1 text-slate-500 transition hover:bg-red-50 hover:text-red-600 dark:text-slate-400 dark:hover:bg-red-950/40"
                                 >
                                   {isDeleting ? (
                                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -971,7 +1017,7 @@ export function TaskDetailModal({
                     aria-live="polite"
                     className="flex items-center gap-2 rounded-xl bg-blue-50/80 px-3 py-1.5 text-xs font-medium text-blue-700 dark:bg-blue-500/15 dark:text-blue-200"
                   >
-                    <span className="h-2 w-2 rounded-full bg-blue-500 animate-pulse shrink-0" />
+                    <span className="h-2 w-2 rounded-full bg-blue-500 motion-safe:animate-pulse shrink-0" />
                     <span>
                       {activeTypingNames.join(', ')}{' '}
                       {activeTypingNames.length === 1

@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Check, Eye, EyeOff, KeyRound, Loader2, Palette, Save, Sparkles, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { ApiError } from '../../lib/api';
 import {
   AVATAR_ACCESSORIES,
@@ -44,6 +45,12 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
   const [showNew, setShowNew] = useState(false);
   const [savingPassword, setSavingPassword] = useState(false);
   const [passwordError, setPasswordError] = useState<string | null>(null);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useFocusTrap(dialogRef, {
+    enabled: open && Boolean(user),
+    onClose,
+  });
 
   useEffect(() => {
     if (open && user) {
@@ -56,17 +63,6 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
       setPasswordError(null);
     }
   }, [open, user]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
 
   if (!user) return null;
 
@@ -140,6 +136,7 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
           onClick={onClose}
         >
           <motion.div
+            ref={dialogRef}
             key="avatar-studio-dialog"
             initial={{ opacity: 0, scale: 0.95, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -148,7 +145,8 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
             role="dialog"
             aria-modal="true"
             aria-labelledby="avatar-studio-title"
-            className="relative w-full max-w-3xl max-h-[90dvh] flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            tabIndex={-1}
+            className="relative w-full max-w-3xl max-h-[90dvh] flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl focus:outline-none dark:border-slate-800 dark:bg-slate-900"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Cabecera del modal */}
@@ -174,7 +172,7 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
                 type="button"
                 onClick={onClose}
                 aria-label="Cerrar ventana"
-                className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -329,6 +327,7 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
                           +
                           <input
                             type="color"
+                            aria-label="Elegir color de fondo personalizado"
                             value={avatar.bg}
                             onChange={(e) => setAvatar((prev) => ({ ...prev, bg: e.target.value }))}
                             className="absolute inset-0 cursor-pointer opacity-0"
@@ -382,6 +381,7 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
                           +
                           <input
                             type="color"
+                            aria-label="Elegir color principal personalizado"
                             value={avatar.color}
                             onChange={(e) =>
                               setAvatar((prev) => ({ ...prev, color: e.target.value }))
@@ -467,7 +467,7 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
                         type="button"
                         onClick={() => setShowCurrent((p) => !p)}
                         aria-label="Mostrar u ocultar contraseña actual"
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
                       >
                         {showCurrent ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                       </button>
@@ -494,7 +494,7 @@ export function AvatarStudioModal({ open, onClose }: AvatarStudioModalProps) {
                         type="button"
                         onClick={() => setShowNew((p) => !p)}
                         aria-label="Mostrar u ocultar nueva contraseña"
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200"
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
                       >
                         {showNew ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                       </button>

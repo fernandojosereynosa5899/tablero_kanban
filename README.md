@@ -6,7 +6,7 @@
 
 Aplicación web **full-stack** para la coordinación en tiempo real de proyectos en equipo (hasta **6 integrantes**: **1 Líder**, **1 Sublíder** y **4 Integrantes**), organizada en cuatro columnas de flujo: **`POR HACER` → `EN PROCESO` → `HECHO` → `APROBADO`**.
 
-Construida con **React 19 + TypeScript + Vite + Tailwind CSS v4 + `@dnd-kit`** en el frontend y **Node.js + Express + Socket.IO + Prisma + PostgreSQL** en el backend, lista para desplegarse como servicio unificado en **Render**.
+Construida con **React 19 + TypeScript + Vite + Tailwind CSS v4 + `@dnd-kit`** en el frontend y **Node.js + Express + Socket.IO + Prisma + PostgreSQL** en el backend, lista para desplegarse en arquitectura híbrida (**Frontend en Vercel + Backend en Render**) o como servicio unificado en **Render**.
 
 > **Video demostración y manuales incluidos en [`docs/`](./docs):**
 > - [Demo en video (`Demo_Tablero_Kanban.mp4`)](./docs/Demo_Tablero_Kanban.mp4)
@@ -143,7 +143,7 @@ El tablero administra **6 cupos fijos** (`slot` `1` al `6`):
 |---|---|
 | **Frontend (`client/`)** | React 19, TypeScript, Vite 6, Tailwind CSS v4, `@dnd-kit/core` + `@dnd-kit/sortable`, Framer Motion, Lucide React, Sonner, Socket.IO Client |
 | **Backend (`server/`)** | Node.js (>= 20.19), Express 4, Socket.IO 4, Prisma ORM 6, PostgreSQL, Zod 4, Helmet, `bcryptjs`, `jsonwebtoken`, Compression |
-| **Despliegue** | Servicio Web unificado en Render (`render.yaml`) + PostgreSQL gestionado |
+| **Despliegue** | **Frontend en Vercel** (`vercel.json` / `client/vercel.json`) + **Backend en Render** (`render.yaml`, `https://tablero-kanban-th2h.onrender.com`) + PostgreSQL gestionado |
 
 ---
 
@@ -221,7 +221,9 @@ Copia [`server/.env.example`](./server/.env.example) a `server/.env` y completa 
 - `JWT_SECRET`: secreto aleatorio mínimo de 64 caracteres hexadecimales (`node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`).
 - `PORT`: puerto del servidor local (por defecto `3000`; en Render no definas `PORT` fijo salvo necesidad específica).
 - `NODE_ENV`: `development` en local y **`production`** en Render (para servir `client/dist`).
-- `CLIENT_ORIGIN`: `http://localhost:5173` en local y `https://<tu-app>.onrender.com` en Render.
+- `CLIENT_ORIGIN`: `http://localhost:5173` en local y la URL productiva de Vercel en Render (ej. `https://tu-tablero.vercel.app`).
+- `ALLOWED_ORIGINS`: lista separada por comas de orígenes adicionales permitidos por CORS (ej. previews `https://tu-tablero-*.vercel.app` o dominio propio).
+- En **Vercel** (`client/.env.example`): configura `VITE_API_URL="https://tablero-kanban-th2h.onrender.com"` como variable de tipo **`Config`** (no `Secret`) en Production, Preview y Development, y vuelve a desplegar (**Redeploy**). Nunca uses prefijos `VITE_*` para secretos.
 - `SEED_INITIAL_PASSWORD`: clave inicial temporal del equipo al inicializar una BD vacía o correr pruebas locales (nunca en código fuente).
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER`: credenciales OAuth 2.0 (valor por defecto de carpeta: `Tablero Kanban`) para almacenar adjuntos en **Google Drive privado + Proxy JWT** (0 B en PostgreSQL, protegiendo la cuota de 1 GB de Render Free) y enviar correos vía **Gmail REST API v1 sobre HTTPS `443`** (evitando el bloqueo de puertos SMTP `25`/`465`/`587` en Render Free).
 - `MAIL_NOTIFY_TO`: correo destinatario que recibe copia de cada archivo adjunto subido (tanto vía Gmail REST API como SMTP).
@@ -324,6 +326,14 @@ Mientras el mantenimiento esté activo, `GET /api/health` continúa respondiendo
 
 ---
 
-## Despliegue en Render
+## Despliegue en Vercel + Render
 
-El proyecto incluye [`render.yaml`](./render.yaml) listo para crear un **Web Service** unificado en Render que sirve la API REST, Socket.IO y los archivos estáticos compilados de `client/dist`. Consulta la guía completa en **[`DESPLIEGUE_RENDER.md`](./DESPLIEGUE_RENDER.md)**.
+El proyecto soporta tanto despliegue híbrido (**Frontend React/Vite en Vercel** mediante [`vercel.json`](./vercel.json) o [`client/vercel.json`](./client/vercel.json) + **Backend Express/Socket.IO en Render** mediante [`render.yaml`](./render.yaml)) como servicio Web unificado en Render.
+
+### Configuración rápida de `VITE_API_URL` en Vercel
+1. En **Vercel Dashboard → Project Settings → Environment Variables**, crea `VITE_API_URL` con valor `https://tablero-kanban-th2h.onrender.com` (sin barra `/` final).
+2. Selecciona explícitamente el tipo **`Config`** (no `Secret`) y aplícala a **Production**, **Preview** y **Development**. Vite incrusta las variables `VITE_*` en el bundle público del navegador en tiempo de compilación, por lo que Vercel bloquea/advierte cuando se intenta marcar `VITE_*` como `Secret`. Los secretos reales (`JWT_SECRET`, `DATABASE_URL`, `GOOGLE_CLIENT_SECRET`, etc.) deben vivir exclusivamente en Render (`server/.env`).
+3. Ejecuta un **Redeploy** en Vercel después de agregar o modificar `VITE_API_URL` para que el build tome el valor actualizado.
+4. En **Render**, define `CLIENT_ORIGIN` con la URL productiva de Vercel y opcionalmente `ALLOWED_ORIGINS` para despliegues Preview (`https://tu-tablero-*.vercel.app`).
+
+Consulta la guía completa paso a paso en **[`DESPLIEGUE_RENDER.md`](./DESPLIEGUE_RENDER.md)**.

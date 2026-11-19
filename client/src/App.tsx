@@ -1,36 +1,108 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Loader2, ShieldAlert, Wrench } from 'lucide-react';
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { MotionConfig } from 'framer-motion';
+import { CheckCircle2, Loader2, LogOut, RefreshCw, ServerCrash, ShieldAlert, Wrench } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
-import { LoginScreen } from './components/auth/LoginScreen';
-import { AvatarStudioModal } from './components/avatars/AvatarStudioModal';
-import { ActivityDrawer } from './components/kanban/ActivityDrawer';
-import { ApprovalCelebration } from './components/kanban/ApprovalCelebration';
-import { KanbanBoard } from './components/kanban/KanbanBoard';
 import { KanbanToolbar, type KanbanFilters } from './components/kanban/KanbanToolbar';
 import { OverdueTasksAlert } from './components/kanban/OverdueTasksAlert';
-import { TaskDetailModal } from './components/kanban/TaskDetailModal';
-import { TaskFormModal } from './components/kanban/TaskFormModal';
 import { TopHeader } from './components/layout/TopHeader';
-import { MaintenanceModal } from './components/maintenance/MaintenanceModal';
-import {
-  getMaintenanceSourceLabel,
-  MaintenanceScreen,
-} from './components/maintenance/MaintenanceScreen';
-import { TeamModal } from './components/team/TeamModal';
-import { OnboardingTutorialModal } from './components/tutorial/OnboardingTutorialModal';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { useKanbanMove } from './hooks/useKanbanMove';
 import { useKanbanRealtime, type CelebrationPayload } from './hooks/useKanbanRealtime';
 import { ApiError } from './lib/api';
-import type { Task, TaskStatus } from './types/kanban';
+import { getMaintenanceSourceLabel, type Task, type TaskStatus } from './types/kanban';
+
+const LoginScreen = lazy(() =>
+  import('./components/auth/LoginScreen').then((m) => ({ default: m.LoginScreen })),
+);
+const MaintenanceScreen = lazy(() =>
+  import('./components/maintenance/MaintenanceScreen').then((m) => ({
+    default: m.MaintenanceScreen,
+  })),
+);
+const KanbanBoard = lazy(() =>
+  import('./components/kanban/KanbanBoard').then((m) => ({ default: m.KanbanBoard })),
+);
+const TaskDetailModal = lazy(() =>
+  import('./components/kanban/TaskDetailModal').then((m) => ({ default: m.TaskDetailModal })),
+);
+const TaskFormModal = lazy(() =>
+  import('./components/kanban/TaskFormModal').then((m) => ({ default: m.TaskFormModal })),
+);
+const TeamModal = lazy(() =>
+  import('./components/team/TeamModal').then((m) => ({ default: m.TeamModal })),
+);
+const MaintenanceModal = lazy(() =>
+  import('./components/maintenance/MaintenanceModal').then((m) => ({
+    default: m.MaintenanceModal,
+  })),
+);
+const ActivityDrawer = lazy(() =>
+  import('./components/kanban/ActivityDrawer').then((m) => ({ default: m.ActivityDrawer })),
+);
+const AvatarStudioModal = lazy(() =>
+  import('./components/avatars/AvatarStudioModal').then((m) => ({
+    default: m.AvatarStudioModal,
+  })),
+);
+const ApprovalCelebration = lazy(() =>
+  import('./components/kanban/ApprovalCelebration').then((m) => ({
+    default: m.ApprovalCelebration,
+  })),
+);
+const OnboardingTutorialModal = lazy(() =>
+  import('./components/tutorial/OnboardingTutorialModal').then((m) => ({
+    default: m.OnboardingTutorialModal,
+  })),
+);
+
+function useEverOpened(isOpen: boolean): boolean {
+  const [everOpened, setEverOpened] = useState(isOpen);
+  useEffect(() => {
+    if (isOpen) {
+      setEverOpened(true);
+    }
+  }, [isOpen]);
+  return everOpened;
+}
+
+function ScreenFallback({ label = 'Cargando vista...' }: { label?: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="min-h-screen flex flex-col items-center justify-center gap-3 overflow-x-hidden bg-[#F3F4F6] dark:bg-[#111215] text-slate-600 dark:text-slate-300"
+    >
+      <Loader2 className="h-8 w-8 animate-spin text-blue-600" aria-hidden="true" />
+      <p className="text-sm font-medium">{label}</p>
+    </div>
+  );
+}
+
+function BoardFallback() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="flex min-h-[360px] flex-col items-center justify-center gap-3 rounded-2xl border border-zinc-200/80 bg-white/70 p-8 text-slate-600 dark:border-[#272A33] dark:bg-[#181A1F]/70 dark:text-slate-300"
+    >
+      <Loader2 className="h-7 w-7 animate-spin text-blue-600" aria-hidden="true" />
+      <p className="text-sm font-medium">Cargando columnas del tablero...</p>
+    </div>
+  );
+}
 
 function BoardShell() {
   const {
     user,
+    token,
     users,
     tasks,
     isLoading,
+    bootstrapError,
+    isRetryingSession,
+    retrySession,
+    logout,
     maintenanceStatus,
     refreshMaintenance,
     updateMaintenance,
@@ -63,6 +135,15 @@ function BoardShell() {
 
   const [celebration, setCelebration] = useState<CelebrationPayload | null>(null);
   const lastCelebrationRef = useRef<{ taskId: string; ts: number } | null>(null);
+
+  const detailMounted = useEverOpened(detailTaskId !== null);
+  const formMounted = useEverOpened(formModalState.open);
+  const teamMounted = useEverOpened(teamModalOpen);
+  const maintenanceMounted = useEverOpened(maintenanceModalOpen);
+  const activityMounted = useEverOpened(activityOpen);
+  const avatarStudioMounted = useEverOpened(avatarStudioOpen);
+  const celebrationMounted = useEverOpened(celebration !== null);
+  const tutorialMounted = useEverOpened(tutorialOpen);
 
   // Mostrar el mini tutorial automáticamente la primera vez que el usuario ingresa
   useEffect(() => {
@@ -188,44 +269,144 @@ function BoardShell() {
     }
   }, [maintenanceStatus?.canDisableInApp, endingMaintenance, updateMaintenance]);
 
+  const handleOpenDetail = useCallback((task: Task) => {
+    setDetailTaskId(task.id);
+  }, []);
+
+  const handleOpenTaskById = useCallback((taskId: string) => {
+    setDetailTaskId(taskId);
+  }, []);
+
+  const handleCloseDetail = useCallback(() => {
+    setDetailTaskId(null);
+  }, []);
+
+  const handleOpenCreateTodo = useCallback(() => {
+    handleOpenCreateModal('TODO');
+  }, [handleOpenCreateModal]);
+
+  const handleCloseFormModal = useCallback(() => {
+    setFormModalState((prev) => ({
+      ...prev,
+      open: false,
+    }));
+  }, []);
+
+  const handleOpenAvatarStudio = useCallback(() => setAvatarStudioOpen(true), []);
+  const handleCloseAvatarStudio = useCallback(() => setAvatarStudioOpen(false), []);
+  const handleOpenTeamModal = useCallback(() => setTeamModalOpen(true), []);
+  const handleCloseTeamModal = useCallback(() => setTeamModalOpen(false), []);
+  const handleOpenMaintenanceModal = useCallback(() => setMaintenanceModalOpen(true), []);
+  const handleCloseMaintenanceModal = useCallback(() => setMaintenanceModalOpen(false), []);
+  const handleOpenActivity = useCallback(() => setActivityOpen(true), []);
+  const handleCloseActivity = useCallback(() => setActivityOpen(false), []);
+  const handleOpenTutorial = useCallback(() => setTutorialOpen(true), []);
+  const handleCompleteCelebration = useCallback(() => setCelebration(null), []);
+
   if (isLoading) {
-    return (
-      <div className="min-h-screen flex flex-col items-center justify-center gap-3 overflow-x-hidden bg-[#F3F4F6] dark:bg-[#111215] text-zinc-600 dark:text-zinc-300">
-        <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
-        <p className="text-sm font-medium">Cargando Tablero Kanban...</p>
-      </div>
-    );
+    return <ScreenFallback label="Cargando Tablero Kanban..." />;
   }
 
   if (maintenanceStatus?.active && !user) {
     return (
-      <MaintenanceScreen
-        status={maintenanceStatus}
-        onRefresh={refreshMaintenance}
-        allowLeaderLogin
-      />
+      <Suspense fallback={<ScreenFallback />}>
+        <MaintenanceScreen
+          status={maintenanceStatus}
+          onRefresh={refreshMaintenance}
+          allowLeaderLogin
+        />
+      </Suspense>
+    );
+  }
+
+  if (token && !user && bootstrapError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center px-4 py-10 bg-[#F3F4F6] dark:bg-[#111215]">
+        <div
+          role="alert"
+          className="w-full max-w-md rounded-2xl border border-zinc-200 bg-white p-6 sm:p-7 shadow-xl dark:border-[#272A33] dark:bg-[#181A1F]"
+        >
+          <div className="flex items-center gap-3">
+            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300">
+              <ServerCrash className="h-6 w-6" aria-hidden="true" />
+            </div>
+            <div>
+              <h1 className="text-base sm:text-lg font-bold text-slate-900 dark:text-white">
+                Conectando con el servidor
+              </h1>
+              <p className="text-xs text-slate-600 dark:text-slate-400">
+                El servidor puede estar despertando tras inactividad
+              </p>
+            </div>
+          </div>
+
+          <p className="mt-4 text-xs sm:text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+            {bootstrapError}
+          </p>
+
+          <p className="mt-2 text-xs text-slate-600 dark:text-slate-400">
+            Tu sesión local se conservó de forma segura. Puedes reintentar la conexión sin volver a
+            escribir tu contraseña.
+          </p>
+
+          <div className="mt-6 flex flex-col sm:flex-row gap-2.5">
+            <button
+              type="button"
+              onClick={() => void retrySession()}
+              disabled={isRetryingSession}
+              className="inline-flex min-h-[40px] flex-1 items-center justify-center gap-2 rounded-xl bg-blue-600 px-4 py-2 text-xs sm:text-sm font-semibold text-white shadow-sm transition hover:bg-blue-700 disabled:opacity-65"
+            >
+              {isRetryingSession ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  <span>Despertando servidor...</span>
+                </>
+              ) : (
+                <>
+                  <RefreshCw className="h-4 w-4" aria-hidden="true" />
+                  <span>Reintentar conexión</span>
+                </>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => logout('Sesión cerrada')}
+              disabled={isRetryingSession}
+              className="inline-flex min-h-[40px] items-center justify-center gap-2 rounded-xl border border-zinc-200 bg-white px-4 py-2 text-xs sm:text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-65 dark:border-[#2D3038] dark:bg-[#212329] dark:text-slate-200 dark:hover:bg-[#292C34]"
+            >
+              <LogOut className="h-4 w-4" aria-hidden="true" />
+              <span>Cerrar sesión</span>
+            </button>
+          </div>
+        </div>
+      </div>
     );
   }
 
   if (!user) {
-    return <LoginScreen />;
+    return (
+      <Suspense fallback={<ScreenFallback />}>
+        <LoginScreen />
+      </Suspense>
+    );
   }
 
   if (maintenanceStatus?.active && user.role !== 'LEADER') {
     return (
-      <MaintenanceScreen status={maintenanceStatus} onRefresh={refreshMaintenance} />
+      <Suspense fallback={<ScreenFallback />}>
+        <MaintenanceScreen status={maintenanceStatus} onRefresh={refreshMaintenance} />
+      </Suspense>
     );
   }
 
   return (
     <div className="min-h-screen flex flex-col overflow-x-hidden bg-[#F3F4F6] dark:bg-[#111215] transition-colors">
       <TopHeader
-        onOpenAvatarStudio={() => setAvatarStudioOpen(true)}
-        onOpenTeam={() => setTeamModalOpen(true)}
-        onOpenTutorial={() => setTutorialOpen(true)}
-        onOpenMaintenance={
-          user.role === 'LEADER' ? () => setMaintenanceModalOpen(true) : undefined
-        }
+        onOpenAvatarStudio={handleOpenAvatarStudio}
+        onOpenTeam={handleOpenTeamModal}
+        onOpenTutorial={handleOpenTutorial}
+        onOpenMaintenance={user.role === 'LEADER' ? handleOpenMaintenanceModal : undefined}
         maintenanceActive={Boolean(maintenanceStatus?.active)}
       />
 
@@ -256,7 +437,7 @@ function BoardShell() {
                 <>
                   <button
                     type="button"
-                    onClick={() => setMaintenanceModalOpen(true)}
+                    onClick={handleOpenMaintenanceModal}
                     disabled={endingMaintenance}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white/90 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 disabled:opacity-50 dark:border-indigo-500/30 dark:bg-[#212329] dark:text-indigo-200 dark:hover:bg-indigo-500/20"
                   >
@@ -289,7 +470,7 @@ function BoardShell() {
                   </span>
                   <button
                     type="button"
-                    onClick={() => setMaintenanceModalOpen(true)}
+                    onClick={handleOpenMaintenanceModal}
                     className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-white/90 px-2.5 py-1 text-xs font-semibold text-indigo-700 transition hover:bg-indigo-50 dark:border-indigo-500/30 dark:bg-[#212329] dark:text-indigo-200 dark:hover:bg-indigo-500/20"
                   >
                     Ver detalles
@@ -311,101 +492,130 @@ function BoardShell() {
           myTasksCount={myTasksCount}
           totalTasksCount={tasks.length}
           filteredTasksCount={filteredTasks.length}
-          onCreateTask={() => handleOpenCreateModal('TODO')}
-          onOpenActivity={() => setActivityOpen(true)}
+          onCreateTask={handleOpenCreateTodo}
+          onOpenActivity={handleOpenActivity}
         />
 
         <OverdueTasksAlert
           tasks={tasks}
           currentUserId={user.id}
           currentUserRole={user.role}
-          onOpenTask={(id) => setDetailTaskId(id)}
+          onOpenTask={handleOpenTaskById}
         />
 
-        <KanbanBoard
-          allTasks={tasks}
-          filteredTasks={filteredTasks}
-          hasActiveFilters={hasActiveFilters}
-          currentUserId={user.id}
-          currentUserRole={user.role}
-          onMoveTask={moveTask}
-          onOpenDetail={(task) => setDetailTaskId(task.id)}
-          onCreateInColumn={
-            user.role === 'LEADER' || user.role === 'SUBLEADER'
-              ? (status) => handleOpenCreateModal(status)
-              : undefined
-          }
-        />
+        <Suspense fallback={<BoardFallback />}>
+          <KanbanBoard
+            allTasks={tasks}
+            filteredTasks={filteredTasks}
+            hasActiveFilters={hasActiveFilters}
+            currentUserId={user.id}
+            currentUserRole={user.role}
+            onMoveTask={moveTask}
+            onOpenDetail={handleOpenDetail}
+            onCreateInColumn={
+              user.role === 'LEADER' || user.role === 'SUBLEADER'
+                ? handleOpenCreateModal
+                : undefined
+            }
+          />
+        </Suspense>
       </main>
 
-      <TaskDetailModal
-        taskId={detailTaskId}
-        onClose={() => setDetailTaskId(null)}
-        onEditTask={handleOpenEditModal}
-        onMoveTask={(task, toStatus) => moveTask(task, toStatus)}
-      />
+      {detailMounted ? (
+        <Suspense fallback={null}>
+          <TaskDetailModal
+            taskId={detailTaskId}
+            onClose={handleCloseDetail}
+            onEditTask={handleOpenEditModal}
+            onMoveTask={moveTask}
+          />
+        </Suspense>
+      ) : null}
 
-      {user.role === 'LEADER' || user.role === 'SUBLEADER' ? (
-        <TaskFormModal
-          open={formModalState.open}
-          task={user.role === 'LEADER' ? formModalState.task : null}
-          initialStatus={formModalState.initialStatus}
-          onClose={() =>
-            setFormModalState((prev) => ({
-              ...prev,
-              open: false,
-            }))
-          }
-        />
+      {(user.role === 'LEADER' || user.role === 'SUBLEADER') && formMounted ? (
+        <Suspense fallback={null}>
+          <TaskFormModal
+            open={formModalState.open}
+            task={user.role === 'LEADER' ? formModalState.task : null}
+            initialStatus={formModalState.initialStatus}
+            onClose={handleCloseFormModal}
+          />
+        </Suspense>
       ) : null}
 
       {user.role === 'LEADER' ? (
         <>
-          <TeamModal
-            open={teamModalOpen}
-            onClose={() => setTeamModalOpen(false)}
-            onOpenMyProfile={() => setAvatarStudioOpen(true)}
-          />
-          <MaintenanceModal
-            open={maintenanceModalOpen}
-            onClose={() => setMaintenanceModalOpen(false)}
-          />
+          {teamMounted ? (
+            <Suspense fallback={null}>
+              <TeamModal
+                open={teamModalOpen}
+                onClose={handleCloseTeamModal}
+                onOpenMyProfile={handleOpenAvatarStudio}
+              />
+            </Suspense>
+          ) : null}
+          {maintenanceMounted ? (
+            <Suspense fallback={null}>
+              <MaintenanceModal
+                open={maintenanceModalOpen}
+                onClose={handleCloseMaintenanceModal}
+              />
+            </Suspense>
+          ) : null}
         </>
       ) : null}
 
-      <ActivityDrawer
-        open={activityOpen}
-        onClose={() => setActivityOpen(false)}
-        onSelectTask={(id) => setDetailTaskId(id)}
-      />
+      {activityMounted ? (
+        <Suspense fallback={null}>
+          <ActivityDrawer
+            open={activityOpen}
+            onClose={handleCloseActivity}
+            onSelectTask={handleOpenTaskById}
+          />
+        </Suspense>
+      ) : null}
 
-      <AvatarStudioModal open={avatarStudioOpen} onClose={() => setAvatarStudioOpen(false)} />
+      {avatarStudioMounted ? (
+        <Suspense fallback={null}>
+          <AvatarStudioModal open={avatarStudioOpen} onClose={handleCloseAvatarStudio} />
+        </Suspense>
+      ) : null}
 
-      <ApprovalCelebration
-        celebration={celebration}
-        onComplete={() => setCelebration(null)}
-      />
+      {celebrationMounted ? (
+        <Suspense fallback={null}>
+          <ApprovalCelebration
+            celebration={celebration}
+            onComplete={handleCompleteCelebration}
+          />
+        </Suspense>
+      ) : null}
 
-      <OnboardingTutorialModal
-        open={tutorialOpen}
-        onClose={handleCloseTutorial}
-      />
+      {tutorialMounted ? (
+        <Suspense fallback={null}>
+          <OnboardingTutorialModal
+            open={tutorialOpen}
+            onClose={handleCloseTutorial}
+          />
+        </Suspense>
+      ) : null}
     </div>
   );
 }
 
 export function App() {
   return (
-    <ThemeProvider>
-      <AuthProvider>
-        <BoardShell />
-        <Toaster
-          richColors
-          position="bottom-right"
-          toastOptions={{ className: 'break-words' }}
-        />
-      </AuthProvider>
-    </ThemeProvider>
+    <MotionConfig reducedMotion="user">
+      <ThemeProvider>
+        <AuthProvider>
+          <BoardShell />
+          <Toaster
+            richColors
+            position="bottom-right"
+            toastOptions={{ className: 'break-words' }}
+          />
+        </AuthProvider>
+      </ThemeProvider>
+    </MotionConfig>
   );
 }
 

@@ -3,16 +3,33 @@ import type { User } from '@prisma/client';
 import { Server } from 'socket.io';
 import { ZodError } from 'zod';
 import { isOriginAllowed } from '../config';
-import { allowSocketMoveEvent, allowSocketTypingEvent } from '../middleware/rateLimit';
+import {
+  allowSocketMoveEvent,
+  allowSocketTypingEvent,
+  clearSocketRateLimits,
+} from '../middleware/rateLimit';
 import { verifyJwtAndLoadUser } from '../services/authService';
 import { getMaintenanceStatus } from '../services/maintenanceService';
 import { buildForbiddenMessage, recordSecurityEvent } from '../services/securityService';
 import * as taskService from '../services/taskService';
-import type { Task } from '../types/domain';
+import type { MaintenanceStatus, Task } from '../types/domain';
 import { formatZodError, socketMoveTaskSchema, socketTypingCommentSchema } from '../utils/validation';
 import { registerRealtimeHooks } from './bus';
 
 type TaskMoveAck = (response: { ok: true; task: Task } | { ok: false; error: string }) => void;
+
+const BOARD_EVENTS = new Set([
+  'task:created',
+  'task:updated',
+  'task:deleted',
+  'task:moved',
+  'task:approved',
+  'comment:created',
+  'comment:deleted',
+  'attachment:created',
+  'attachment:deleted',
+  'activity:new',
+]);
 
 function extractHandshakeToken(authToken: unknown, authHeader: string | undefined): string | null {
   if (typeof authToken === 'string' && authToken.trim().length > 0) {
@@ -44,6 +61,7 @@ export function setupSocketIO(httpServer: HttpServer): Server {
   });
 
   const onlineCounts = new Map<string, number>();
+  let maintenanceBroadcastActive = false;
 
   io.use(async (socket, next) => {
     const token = extractHandshakeToken(
@@ -65,22 +83,51 @@ export function setupSocketIO(httpServer: HttpServer): Server {
     }
 
     const maintenance = await getMaintenanceStatus().catch(() => null);
+    if (maintenance) {
+      maintenanceBroadcastActive = maintenance.active;
+    }
     if (maintenance?.active && user.role !== 'LEADER') {
       next(new Error('maintenance'));
       return;
     }
 
     socket.data.user = user;
+    socket.data.revoked = false;
     next();
   });
 
   const emitPresence = (): void => {
-    io.emit('presence:update', { onlineUserIds: Array.from(onlineCounts.keys()) });
+    const payload = { onlineUserIds: Array.from(onlineCounts.keys()) };
+    if (maintenanceBroadcastActive) {
+      io.to('role:LEADER').emit('presence:update', payload);
+      return;
+    }
+    io.emit('presence:update', payload);
+  };
+
+  const scheduleNonLeaderMaintenanceDisconnect = (): void => {
+    const nonLeaderSockets = Array.from(io.sockets.sockets.values()).filter((s) => {
+      const socketUser = s.data.user as User | undefined;
+      return socketUser?.role !== 'LEADER';
+    });
+    if (nonLeaderSockets.length === 0) return;
+
+    const timer = setTimeout(() => {
+      if (!maintenanceBroadcastActive) return;
+      for (const s of nonLeaderSockets) {
+        if (s.connected) {
+          s.disconnect(true);
+        }
+      }
+    }, 100);
+    timer.unref();
   };
 
   io.on('connection', (socket) => {
     const user = socket.data.user as User;
+    socket.data.revoked = false;
     socket.join(`user:${user.id}`);
+    socket.join(`role:${user.role}`);
 
     onlineCounts.set(user.id, (onlineCounts.get(user.id) ?? 0) + 1);
     emitPresence();
@@ -91,6 +138,11 @@ export function setupSocketIO(httpServer: HttpServer): Server {
           (ack as TaskMoveAck)(response);
         }
       };
+
+      if (socket.data.revoked === true) {
+        respond({ ok: false, error: 'Sesión revocada' });
+        return;
+      }
 
       if (!allowSocketMoveEvent(socket.id)) {
         void recordSecurityEvent({
@@ -107,8 +159,16 @@ export function setupSocketIO(httpServer: HttpServer): Server {
       }
 
       const maintenance = await getMaintenanceStatus().catch(() => null);
+      if (maintenance) {
+        maintenanceBroadcastActive = maintenance.active;
+      }
       if (maintenance?.active && user.role !== 'LEADER') {
         respond({ ok: false, error: maintenance.message });
+        return;
+      }
+
+      if (socket.data.revoked === true) {
+        respond({ ok: false, error: 'Sesión revocada' });
         return;
       }
 
@@ -130,20 +190,39 @@ export function setupSocketIO(httpServer: HttpServer): Server {
       }
     });
 
-    socket.on('comment:typing', (rawPayload: unknown) => {
-      if (!allowSocketTypingEvent(socket.id)) return;
-      const parsed = socketTypingCommentSchema.safeParse(rawPayload);
-      if (!parsed.success) return;
+    socket.on('comment:typing', async (rawPayload: unknown) => {
+      try {
+        if (socket.data.revoked === true) return;
+        if (!allowSocketTypingEvent(socket.id)) return;
+        const parsed = socketTypingCommentSchema.safeParse(rawPayload);
+        if (!parsed.success) return;
 
-      socket.broadcast.emit('comment:typing', {
-        taskId: parsed.data.taskId,
-        userId: user.id,
-        displayName: user.displayName,
-        isTyping: parsed.data.isTyping,
-      });
+        const maintenance = await getMaintenanceStatus().catch(() => null);
+        if (maintenance) {
+          maintenanceBroadcastActive = maintenance.active;
+        }
+        if (maintenance?.active && user.role !== 'LEADER') return;
+        if (socket.data.revoked === true || !socket.connected) return;
+
+        const payload = {
+          taskId: parsed.data.taskId,
+          userId: user.id,
+          displayName: user.displayName,
+          isTyping: parsed.data.isTyping,
+        };
+
+        if (maintenance?.active) {
+          socket.broadcast.to('role:LEADER').emit('comment:typing', payload);
+          return;
+        }
+        socket.broadcast.emit('comment:typing', payload);
+      } catch {
+        // Ignorar errores transitorios en evento efímero de escritura
+      }
     });
 
     socket.on('disconnect', () => {
+      clearSocketRateLimits(socket.id);
       const current = onlineCounts.get(user.id) ?? 0;
       if (current <= 1) {
         onlineCounts.delete(user.id);
@@ -155,8 +234,16 @@ export function setupSocketIO(httpServer: HttpServer): Server {
 
     void getMaintenanceStatus()
       .then((status) => {
-        if (socket.connected) {
-          socket.emit('maintenance:updated', status);
+        maintenanceBroadcastActive = status.active;
+        if (!socket.connected) return;
+        socket.emit('maintenance:updated', status);
+        if (status.active && user.role !== 'LEADER') {
+          const timer = setTimeout(() => {
+            if (maintenanceBroadcastActive && socket.connected) {
+              socket.disconnect(true);
+            }
+          }, 100);
+          timer.unref();
         }
       })
       .catch(() => {});
@@ -164,15 +251,56 @@ export function setupSocketIO(httpServer: HttpServer): Server {
 
   registerRealtimeHooks({
     emitEvent: (event, payload) => {
+      if (event === 'maintenance:updated') {
+        const status = payload as MaintenanceStatus;
+        maintenanceBroadcastActive = status.active;
+        io.emit('maintenance:updated', status);
+        if (status.active) {
+          scheduleNonLeaderMaintenanceDisconnect();
+        }
+        return;
+      }
+
+      if (maintenanceBroadcastActive && BOARD_EVENTS.has(event)) {
+        io.to('role:LEADER').emit(event, payload);
+        return;
+      }
+
       io.emit(event, payload);
     },
     emitUserEvent: (event, payload) => {
+      if (maintenanceBroadcastActive) {
+        io.to('role:LEADER').emit(event, payload);
+        return;
+      }
       io.emit(event, payload);
     },
     revokeUserSession: (userId, reason) => {
       const room = `user:${userId}`;
-      io.to(room).emit('session:revoked', { reason });
-      io.in(room).disconnectSockets(true);
+      const socketIds = io.sockets.adapter.rooms.get(room);
+      if (!socketIds || socketIds.size === 0) {
+        return;
+      }
+
+      const targets = Array.from(socketIds)
+        .map((sid) => io.sockets.sockets.get(sid))
+        .filter((s): s is NonNullable<typeof s> => Boolean(s));
+
+      for (const s of targets) {
+        s.data.revoked = true;
+        s.emit('session:revoked', { reason });
+      }
+
+      if (targets.length > 0) {
+        const timer = setTimeout(() => {
+          for (const s of targets) {
+            if (s.connected) {
+              s.disconnect(true);
+            }
+          }
+        }, 100);
+        timer.unref();
+      }
     },
   });
 

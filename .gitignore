@@ -25,6 +25,8 @@ yarn-error.log*
 
 # Tests / cobertura
 coverage/
+test-results/
+playwright-report/
 
 # Sistema operativo
 .DS_Store

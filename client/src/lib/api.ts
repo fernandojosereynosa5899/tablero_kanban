@@ -16,13 +16,24 @@ import type {
   UsersListResponse,
 } from '../types/kanban';
 
+export type ApiErrorCode = 'NETWORK' | 'TIMEOUT' | 'NON_JSON' | 'HTTP';
+
+export interface ApiErrorOptions extends ErrorOptions {
+  isTimeout?: boolean;
+  code?: ApiErrorCode;
+}
+
 export class ApiError extends Error {
   readonly status: number;
+  readonly isTimeout: boolean;
+  readonly code: ApiErrorCode;
 
-  constructor(status: number, message: string) {
-    super(message);
+  constructor(status: number, message: string, options?: ApiErrorOptions) {
+    super(message, options);
     this.name = 'ApiError';
     this.status = status;
+    this.isTimeout = Boolean(options?.isTimeout);
+    this.code = options?.code ?? (status === 0 ? 'NETWORK' : 'HTTP');
   }
 }
 
@@ -56,15 +67,71 @@ export function setMaintenanceHandler(handler: MaintenanceHandler | null): void 
   maintenanceHandler = handler;
 }
 
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_UPLOAD_TIMEOUT_MS = 60_000;
+const DEFAULT_DOWNLOAD_TIMEOUT_MS = 60_000;
+
 interface RequestOptions {
   method?: 'GET' | 'POST' | 'PATCH' | 'DELETE';
   body?: unknown;
   skipAuth?: boolean;
   skipUnauthorizedCallback?: boolean;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}
+
+function createAbortScope(timeoutMs: number, externalSignal?: AbortSignal) {
+  const controller = new AbortController();
+  let timedOut = false;
+  let timerId: number | null = null;
+
+  const handleExternalAbort = () => {
+    controller.abort(externalSignal?.reason);
+  };
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort(externalSignal.reason);
+    } else {
+      externalSignal.addEventListener('abort', handleExternalAbort, { once: true });
+    }
+  }
+
+  if (timeoutMs > 0 && Number.isFinite(timeoutMs)) {
+    timerId = window.setTimeout(() => {
+      timedOut = true;
+      controller.abort(new DOMException('Request timeout', 'TimeoutError'));
+    }, timeoutMs);
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      if (timerId !== null) {
+        window.clearTimeout(timerId);
+        timerId = null;
+      }
+      if (externalSignal) {
+        externalSignal.removeEventListener('abort', handleExternalAbort);
+      }
+    },
+  };
+}
+
+function isJsonContentType(contentType: string): boolean {
+  return /\bjson\b/i.test(contentType);
 }
 
 async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const { method = 'GET', body, skipAuth = false, skipUnauthorizedCallback = false } = options;
+  const {
+    method = 'GET',
+    body,
+    skipAuth = false,
+    skipUnauthorizedCallback = false,
+    timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+    signal: externalSignal,
+  } = options;
   const isFormData = typeof FormData !== 'undefined' && body instanceof FormData;
 
   const headers: Record<string, string> = {
@@ -79,54 +146,103 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers.Authorization = `Bearer ${authToken}`;
   }
 
+  const abortScope = createAbortScope(timeoutMs, externalSignal);
+
   let response: Response;
   try {
     response = await fetch(buildApiUrl(path), {
       method,
       headers,
       body: isFormData ? body : body !== undefined ? JSON.stringify(body) : undefined,
+      signal: abortScope.signal,
     });
-  } catch {
-    throw new ApiError(0, 'No se pudo conectar con el servidor');
+  } catch (err) {
+    abortScope.cleanup();
+    if (abortScope.didTimeout()) {
+      throw new ApiError(
+        0,
+        'El servidor tardó demasiado en responder (puede estar iniciando en Render). Intenta nuevamente en unos segundos.',
+        { cause: err, isTimeout: true, code: 'TIMEOUT' },
+      );
+    }
+    if (externalSignal?.aborted) {
+      throw new ApiError(0, 'Solicitud cancelada.', { cause: err, code: 'NETWORK' });
+    }
+    throw new ApiError(0, 'No se pudo conectar con el servidor', { cause: err, code: 'NETWORK' });
   }
 
-  let payload: unknown = null;
-  const contentType = response.headers.get('content-type') ?? '';
-  if (contentType.includes('application/json')) {
-    try {
-      payload = await response.json();
-    } catch {
-      payload = null;
+  try {
+    if (response.ok && (response.status === 204 || response.status === 205)) {
+      return undefined as T;
     }
+
+    let payload: unknown = null;
+    let jsonParseError: unknown = null;
+    const contentType = response.headers.get('content-type') ?? '';
+    const hasJsonContent = isJsonContentType(contentType);
+
+    if (hasJsonContent) {
+      try {
+        payload = await response.json();
+      } catch (err) {
+        payload = null;
+        jsonParseError = err;
+      }
+    }
+
+    if (!response.ok) {
+      const isMaintenancePayload =
+        response.status === 503 &&
+        payload !== null &&
+        typeof payload === 'object' &&
+        (payload as { maintenance?: unknown }).maintenance === true;
+
+      if (isMaintenancePayload) {
+        maintenanceHandler?.((payload as { status?: MaintenanceStatus }).status);
+      }
+
+      const message =
+        payload &&
+        typeof payload === 'object' &&
+        'error' in payload &&
+        typeof (payload as { error?: unknown }).error === 'string'
+          ? (payload as { error: string }).error
+          : `Error ${response.status} al comunicarse con el servidor`;
+
+      if (response.status === 401 && !skipUnauthorizedCallback && !isMaintenancePayload) {
+        unauthorizedHandler?.();
+      }
+
+      throw new ApiError(response.status, message, { code: 'HTTP' });
+    }
+
+    if (!hasJsonContent) {
+      if (contentType.toLowerCase().includes('text/html')) {
+        throw new ApiError(
+          response.status,
+          'El servidor devolvió una página HTML en lugar de datos JSON. Verifica la configuración de VITE_API_URL o la disponibilidad del backend.',
+          { code: 'NON_JSON' },
+        );
+      }
+      throw new ApiError(
+        response.status,
+        'Respuesta inesperada del servidor (formato no JSON).',
+        { code: 'NON_JSON' },
+      );
+    }
+
+    if (jsonParseError !== null) {
+      throw new ApiError(
+        response.status,
+        'La respuesta JSON del servidor está incompleta o dañada.',
+        { cause: jsonParseError, code: 'NON_JSON' },
+      );
+    }
+
+    return payload as T;
+  } finally {
+    abortScope.cleanup();
   }
-
-  if (!response.ok) {
-    const isMaintenancePayload =
-      response.status === 503 &&
-      payload !== null &&
-      typeof payload === 'object' &&
-      (payload as { maintenance?: unknown }).maintenance === true;
-
-    if (isMaintenancePayload) {
-      maintenanceHandler?.((payload as { status?: MaintenanceStatus }).status);
-    }
-
-    const message =
-      payload &&
-      typeof payload === 'object' &&
-      'error' in payload &&
-      typeof (payload as { error?: unknown }).error === 'string'
-        ? (payload as { error: string }).error
-        : `Error ${response.status} al comunicarse con el servidor`;
-
-    if (response.status === 401 && !skipUnauthorizedCallback && !isMaintenancePayload) {
-      unauthorizedHandler?.();
-    }
-
-    throw new ApiError(response.status, message);
-  }
-
-  return payload as T;
 }
 
 export interface UpdateMeInput {
@@ -361,6 +477,7 @@ export const api = {
       {
         method: 'POST',
         body: formData,
+        timeoutMs: DEFAULT_UPLOAD_TIMEOUT_MS,
       },
     );
   },
@@ -387,11 +504,18 @@ export const api = {
     });
   },
 
-  async fetchAttachmentBlob(attachmentId: string, inline = false): Promise<Blob> {
+  async fetchAttachmentBlob(
+    attachmentId: string,
+    inline = false,
+    options: { timeoutMs?: number; signal?: AbortSignal; skipUnauthorizedCallback?: boolean } = {},
+  ): Promise<Blob> {
     const headers: Record<string, string> = {};
     if (authToken) {
       headers.Authorization = `Bearer ${authToken}`;
     }
+
+    const timeoutMs = options.timeoutMs ?? DEFAULT_DOWNLOAD_TIMEOUT_MS;
+    const abortScope = createAbortScope(timeoutMs, options.signal);
 
     let response: Response;
     try {
@@ -401,36 +525,69 @@ export const api = {
         {
           method: 'GET',
           headers,
+          signal: abortScope.signal,
         },
       );
-    } catch {
-      throw new ApiError(0, 'No se pudo descargar el archivo desde el servidor');
+    } catch (err) {
+      abortScope.cleanup();
+      if (abortScope.didTimeout()) {
+        throw new ApiError(
+          0,
+          'La descarga tardó demasiado en responder (el servidor puede estar iniciando en Render). Intenta nuevamente.',
+          { cause: err, isTimeout: true, code: 'TIMEOUT' },
+        );
+      }
+      if (options.signal?.aborted) {
+        throw new ApiError(0, 'Descarga cancelada.', { cause: err, code: 'NETWORK' });
+      }
+      throw new ApiError(0, 'No se pudo descargar el archivo desde el servidor', {
+        cause: err,
+        code: 'NETWORK',
+      });
     }
 
-    if (!response.ok) {
-      let message = `Error ${response.status} al descargar el archivo`;
+    try {
       const contentType = response.headers.get('content-type') ?? '';
-      if (contentType.includes('application/json')) {
-        try {
-          const payload = (await response.json()) as {
-            error?: unknown;
-            maintenance?: unknown;
-            status?: MaintenanceStatus;
-          };
-          if (response.status === 503 && payload.maintenance === true) {
-            maintenanceHandler?.(payload.status);
+      if (!response.ok) {
+        let message = `Error ${response.status} al descargar el archivo`;
+        let isMaintenancePayload = false;
+        if (isJsonContentType(contentType)) {
+          try {
+            const payload = (await response.json()) as {
+              error?: unknown;
+              maintenance?: unknown;
+              status?: MaintenanceStatus;
+            };
+            isMaintenancePayload = response.status === 503 && payload.maintenance === true;
+            if (isMaintenancePayload) {
+              maintenanceHandler?.(payload.status);
+            }
+            if (typeof payload.error === 'string') message = payload.error;
+          } catch {
+            // Ignorar error de parseo
           }
-          if (typeof payload.error === 'string') message = payload.error;
-        } catch {
-          // Ignorar error de parseo
         }
+        if (
+          response.status === 401 &&
+          !options.skipUnauthorizedCallback &&
+          !isMaintenancePayload
+        ) {
+          unauthorizedHandler?.();
+        }
+        throw new ApiError(response.status, message, { code: 'HTTP' });
       }
-      if (response.status === 401) {
-        unauthorizedHandler?.();
-      }
-      throw new ApiError(response.status, message);
-    }
 
-    return response.blob();
+      if (contentType.toLowerCase().includes('text/html')) {
+        throw new ApiError(
+          response.status,
+          'No se pudo descargar el archivo: se recibió una página HTML en lugar del archivo (verifica VITE_API_URL).',
+          { code: 'NON_JSON' },
+        );
+      }
+
+      return await response.blob();
+    } finally {
+      abortScope.cleanup();
+    }
   },
 };

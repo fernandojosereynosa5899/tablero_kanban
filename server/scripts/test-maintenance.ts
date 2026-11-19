@@ -307,6 +307,19 @@ async function main(): Promise<void> {
         payload.title === customTitle,
       5000,
     );
+    const memberDisconnectedPromise = new Promise<string>((resolve, reject) => {
+      if (!member1Socket.connected) {
+        resolve('already_disconnected');
+        return;
+      }
+      const timer = setTimeout(() => {
+        reject(new Error('Timeout esperando desconexión de member1Socket tras mantenimiento'));
+      }, 5000);
+      member1Socket.once('disconnect', (reason) => {
+        clearTimeout(timer);
+        resolve(reason);
+      });
+    });
 
     const enableRes = await requestJson<MaintenanceStatus>(baseUrl, '/api/maintenance', {
       method: 'PATCH',
@@ -319,13 +332,14 @@ async function main(): Promise<void> {
       },
     });
 
-    const [liderActivatedEv, memberActivatedEv] = await Promise.all([
+    const [liderActivatedEv, memberActivatedEv, memberDisconnectReason] = await Promise.all([
       liderActivatedEvPromise,
       memberActivatedEvPromise,
+      memberDisconnectedPromise,
     ]);
 
     check(
-      '2b. Líder activa mantenimiento en BD (PATCH /api/maintenance -> 200) y emite maintenance:updated',
+      '2b. Líder activa mantenimiento en BD (PATCH /api/maintenance -> 200), emite maintenance:updated y desconecta socket no-LEADER',
       () => {
         assert.equal(enableRes.status, 200);
         assert.equal(enableRes.data.active, true);
@@ -336,6 +350,9 @@ async function main(): Promise<void> {
         assert.equal(enableRes.data.estimatedMinutes, customEta);
         assert.equal(enableRes.data.updatedByName, liderAuth.displayName);
         assert.ok(typeof enableRes.data.updatedAt === 'string' && enableRes.data.updatedAt.length > 0);
+        assert.equal(member1Socket.connected, false);
+        assert.ok(memberDisconnectReason.length > 0);
+        assert.equal(liderSocket.connected, true);
 
         for (const ev of [liderActivatedEv, memberActivatedEv]) {
           assert.equal(ev.active, true);
@@ -567,12 +584,6 @@ async function main(): Promise<void> {
       (payload) => payload.active === false && payload.source === 'none',
       5000,
     );
-    const memberDisabledEvPromise = waitForEvent<MaintenanceStatus>(
-      member1Socket,
-      'maintenance:updated',
-      (payload) => payload.active === false && payload.source === 'none',
-      5000,
-    );
 
     const disableRes = await requestJson<MaintenanceStatus>(baseUrl, '/api/maintenance', {
       method: 'PATCH',
@@ -580,10 +591,7 @@ async function main(): Promise<void> {
       body: { enabled: false },
     });
 
-    const [liderDisabledEv, memberDisabledEv] = await Promise.all([
-      liderDisabledEvPromise,
-      memberDisabledEvPromise,
-    ]);
+    const liderDisabledEv = await liderDisabledEvPromise;
 
     const finalHealth = await requestJson<{
       status: string;
@@ -610,8 +618,6 @@ async function main(): Promise<void> {
 
         assert.equal(liderDisabledEv.active, false);
         assert.equal(liderDisabledEv.source, 'none');
-        assert.equal(memberDisabledEv.active, false);
-        assert.equal(memberDisabledEv.source, 'none');
 
         assert.equal(finalHealth.status, 200);
         assert.equal(finalHealth.data.status, 'ok');

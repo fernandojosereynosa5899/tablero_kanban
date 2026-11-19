@@ -1,7 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   Activity as ActivityIcon,
+  AlertTriangle,
   ArrowRight,
   Award,
   CheckSquare,
@@ -20,6 +21,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { api, ApiError } from '../../lib/api';
 import { TASK_STATUS_LABELS, type Activity, type TaskStatus } from '../../types/kanban';
 import { VectorAvatar } from '../avatars/VectorAvatar';
@@ -161,9 +163,17 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
   const { socket, tasks } = useAuth();
   const [items, setItems] = useState<Activity[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
 
-  const loadActivity = () => {
+  useFocusTrap(drawerRef, {
+    enabled: open,
+    onClose,
+  });
+
+  const loadActivity = useCallback(() => {
     setLoading(true);
+    setError(null);
     api
       .listActivity(30)
       .then((list) => {
@@ -171,17 +181,18 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
       })
       .catch((err) => {
         const msg = err instanceof ApiError ? err.message : 'No se pudo cargar la actividad';
+        setError(msg);
         toast.error(msg);
       })
       .finally(() => {
         setLoading(false);
       });
-  };
+  }, []);
 
   useEffect(() => {
     if (!open) return;
     loadActivity();
-  }, [open]);
+  }, [open, loadActivity]);
 
   useEffect(() => {
     if (!open || !socket) return;
@@ -199,16 +210,10 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
     };
   }, [open, socket]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
-
-  const existingTaskIds = new Set(tasks.map((t) => t.id));
+  const existingTaskIds = useMemo(
+    () => (open ? new Set(tasks.map((t) => t.id)) : null),
+    [open, tasks],
+  );
 
   return (
     <AnimatePresence>
@@ -223,6 +228,7 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
           onClick={onClose}
         >
           <motion.aside
+            ref={drawerRef}
             key="activity-drawer-panel"
             initial={{ x: '100%' }}
             animate={{ x: 0 }}
@@ -231,8 +237,9 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
             role="dialog"
             aria-modal="true"
             aria-labelledby="activity-drawer-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
-            className="flex h-full w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            className="flex h-full w-full max-w-md flex-col border-l border-slate-200 bg-white shadow-2xl focus:outline-none dark:border-slate-800 dark:bg-slate-900"
           >
             {/* Cabecera */}
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4 dark:border-slate-800">
@@ -260,7 +267,7 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
                   disabled={loading}
                   title="Actualizar historial"
                   aria-label="Actualizar historial"
-                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                 >
                   <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
                 </button>
@@ -268,7 +275,7 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
                   type="button"
                   onClick={onClose}
                   aria-label="Cerrar panel de actividad"
-                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
                 >
                   <X className="h-5 w-5" />
                 </button>
@@ -277,15 +284,50 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
 
             {/* Lista de actividad */}
             <div className="flex-1 overflow-y-auto p-4 sm:p-5">
+              {error ? (
+                <div
+                  role="alert"
+                  className="mb-3 flex items-center justify-between gap-2 rounded-2xl border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800 dark:border-rose-500/35 dark:bg-rose-950/40 dark:text-rose-200"
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{error}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={loadActivity}
+                    disabled={loading}
+                    className="inline-flex min-h-[32px] shrink-0 items-center gap-1 rounded-lg border border-rose-300 bg-white px-2.5 py-1 text-xs font-semibold text-rose-700 transition hover:bg-rose-100 disabled:opacity-50 dark:border-rose-500/40 dark:bg-slate-900 dark:text-rose-200"
+                  >
+                    <RefreshCw className={`h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+                    Reintentar
+                  </button>
+                </div>
+              ) : null}
+
               {loading && items.length === 0 ? (
-                <div className="flex flex-col items-center justify-center gap-2 py-16 text-xs text-slate-500">
+                <div className="flex flex-col items-center justify-center gap-2 py-16 text-xs text-slate-600 dark:text-slate-400">
                   <Loader2 className="h-6 w-6 animate-spin text-violet-500" />
                   <span>Cargando actividad reciente...</span>
+                </div>
+              ) : error && items.length === 0 ? (
+                <div className="flex flex-col items-center justify-center py-12 text-center">
+                  <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">
+                    No se pudo cargar el historial de actividad
+                  </p>
+                  <button
+                    type="button"
+                    onClick={loadActivity}
+                    className="mt-3 inline-flex min-h-[36px] items-center gap-1.5 rounded-xl bg-violet-600 px-4 py-2 text-xs font-semibold text-white transition hover:bg-violet-700"
+                  >
+                    <RefreshCw className="h-3.5 w-3.5" />
+                    Reintentar
+                  </button>
                 </div>
               ) : items.length === 0 ? (
                 <div className="flex flex-col items-center justify-center py-16 text-center">
                   <EmptyActivityIllustration />
-                  <p className="mt-3 text-sm font-medium text-slate-500 dark:text-slate-400">
+                  <p className="mt-3 text-sm font-medium text-slate-600 dark:text-slate-400">
                     Todavía no hay actividad registrada
                   </p>
                 </div>
@@ -294,7 +336,9 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
                   {items.map((item) => {
                     const { text, icon: Icon, badgeClass } = describeActivity(item);
                     const canOpenTask =
-                      item.taskId !== null && existingTaskIds.has(item.taskId) && onSelectTask;
+                      item.taskId !== null &&
+                      Boolean(existingTaskIds?.has(item.taskId)) &&
+                      onSelectTask;
                     const actorName = item.user ? item.user.displayName : 'Sistema';
 
                     return (
@@ -321,7 +365,7 @@ export function ActivityDrawer({ open, onClose, onSelectTask }: ActivityDrawerPr
                           </p>
 
                           <div className="mt-1.5 flex items-center justify-between gap-2">
-                            <span className="inline-flex items-center gap-1 text-[11px] text-slate-400">
+                            <span className="inline-flex items-center gap-1 text-[11px] text-slate-600 dark:text-slate-400">
                               <Icon className="h-3 w-3" />
                               {formatRelativeTimeEs(item.createdAt)}
                             </span>

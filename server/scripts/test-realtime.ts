@@ -377,52 +377,7 @@ async function main(): Promise<void> {
       assert.equal(memberApproveRest.data.error, 'Solo el líder puede aprobar tareas');
     });
 
-    // 7. Líder aprueba la tarea -> ack.ok, approvedAt !== null, task:moved y task:approved
-    const movedApprovedM1 = waitForEvent<{ task: Task; toStatus: string }>(
-      member1Socket,
-      'task:moved',
-      (e) => e.task.id === tempTaskId && e.toStatus === 'APPROVED',
-      5000,
-    );
-    const approvedEvM1 = waitForEvent<{ task: Task; by: { id: string } }>(
-      member1Socket,
-      'task:approved',
-      (e) => e.task.id === tempTaskId,
-      5000,
-    );
-    const approveAck = await emitTaskMove(liderSocket, { taskId: tempTaskId, status: 'APPROVED' });
-    const [approvedMoved, approvedEv] = await Promise.all([movedApprovedM1, approvedEvM1]);
-    check('Líder aprueba tarea -> approvedAt != null, emite task:moved y task:approved', () => {
-      assert.equal(approveAck.ok, true);
-      if (approveAck.ok) {
-        assert.equal(approveAck.task.status, 'APPROVED');
-        assert.ok(approveAck.task.approvedAt !== null);
-      }
-      assert.equal(approvedMoved.task.status, 'APPROVED');
-      assert.equal(approvedEv.task.id, tempTaskId);
-      assert.equal(approvedEv.by.id, liderAuth!.userId);
-    });
-
-    // 8. integrante1 intenta mover tarea ya APPROVED -> rechazado (socket y REST 403)
-    const moveOutOfApprovedSocket = await emitTaskMove(member1Socket, {
-      taskId: tempTaskId,
-      status: 'IN_PROGRESS',
-    });
-    const moveOutOfApprovedRest = await requestJson<{ error: string }>(
-      baseUrl,
-      `/api/tasks/${tempTaskId}/move`,
-      {
-        method: 'PATCH',
-        token: member1Auth.token,
-        body: { status: 'IN_PROGRESS' },
-      },
-    );
-    check('integrante1 no puede sacar tarea de APPROVED (socket ok:false y REST 403)', () => {
-      assert.equal(moveOutOfApprovedSocket.ok, false);
-      assert.equal(moveOutOfApprovedRest.status, 403);
-    });
-
-    // 9. Subtareas y comentarios
+    // 7. Subtareas antes de APPROVED: líder crea, integrante1 marca done (200), no edita title (403), integrante2 no marca done (403)
     const subCreatedPromise = waitForEvent<Task>(
       member1Socket,
       'task:updated',
@@ -470,10 +425,75 @@ async function main(): Promise<void> {
       },
     );
 
-    check('Subtareas: líder crea, integrante1 marca done, integrante1 no edita title (403), integrante2 no marca done (403)', () => {
+    check('Subtareas antes de APPROVED: líder crea, integrante1 marca done (200), no edita title (403), integrante2 no marca done (403)', () => {
       assert.equal(toggleSubM1.status, 200);
       assert.equal(editTitleAsM1.status, 403);
       assert.equal(toggleSubAsM2.status, 403);
+    });
+
+    // 8. Líder aprueba la tarea -> ack.ok, approvedAt !== null, task:moved y task:approved
+    const movedApprovedM1 = waitForEvent<{ task: Task; toStatus: string }>(
+      member1Socket,
+      'task:moved',
+      (e) => e.task.id === tempTaskId && e.toStatus === 'APPROVED',
+      5000,
+    );
+    const approvedEvM1 = waitForEvent<{ task: Task; by: { id: string } }>(
+      member1Socket,
+      'task:approved',
+      (e) => e.task.id === tempTaskId,
+      5000,
+    );
+    const approveAck = await emitTaskMove(liderSocket, { taskId: tempTaskId, status: 'APPROVED' });
+    const [approvedMoved, approvedEv] = await Promise.all([movedApprovedM1, approvedEvM1]);
+    check('Líder aprueba tarea -> approvedAt != null, emite task:moved y task:approved', () => {
+      assert.equal(approveAck.ok, true);
+      if (approveAck.ok) {
+        assert.equal(approveAck.task.status, 'APPROVED');
+        assert.ok(approveAck.task.approvedAt !== null);
+      }
+      assert.equal(approvedMoved.task.status, 'APPROVED');
+      assert.equal(approvedEv.task.id, tempTaskId);
+      assert.equal(approvedEv.by.id, liderAuth!.userId);
+    });
+
+    // 9. integrante1 intenta mover tarea ya APPROVED o modificar subtarea -> rechazado (socket y REST 403)
+    const moveOutOfApprovedSocket = await emitTaskMove(member1Socket, {
+      taskId: tempTaskId,
+      status: 'IN_PROGRESS',
+    });
+    const moveOutOfApprovedRest = await requestJson<{ error: string }>(
+      baseUrl,
+      `/api/tasks/${tempTaskId}/move`,
+      {
+        method: 'PATCH',
+        token: member1Auth.token,
+        body: { status: 'IN_PROGRESS' },
+      },
+    );
+    const toggleSubApprovedM1 = await requestJson<{ error: string }>(
+      baseUrl,
+      `/api/subtasks/${secondSubtask.id}`,
+      {
+        method: 'PATCH',
+        token: member1Auth.token,
+        body: { done: false },
+      },
+    );
+    const toggleSubApprovedLider = await requestJson<Task>(
+      baseUrl,
+      `/api/subtasks/${secondSubtask.id}`,
+      {
+        method: 'PATCH',
+        token: liderAuth.token,
+        body: { done: false },
+      },
+    );
+    check('Tarea APPROVED bloqueada para integrante1 (move 403 y subtask 403), líder conserva acceso (200)', () => {
+      assert.equal(moveOutOfApprovedSocket.ok, false);
+      assert.equal(moveOutOfApprovedRest.status, 403);
+      assert.equal(toggleSubApprovedM1.status, 403);
+      assert.equal(toggleSubApprovedLider.status, 200);
     });
 
     // Comentarios

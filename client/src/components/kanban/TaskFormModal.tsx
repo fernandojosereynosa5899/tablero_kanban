@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import { Calendar, Check, Loader2, Plus, Save, StickyNote, Trash2, Users, X } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { api, ApiError } from '../../lib/api';
 import {
   DEFAULT_POSTIT_COLOR,
@@ -109,6 +110,12 @@ export function TaskFormModal({
   const [initialSubtasks, setInitialSubtasks] = useState<string[]>([]);
   const [errors, setErrors] = useState<Partial<Record<TaskFormFieldErrorKey, string>>>({});
   const [saving, setSaving] = useState(false);
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+
+  useFocusTrap(dialogRef, {
+    enabled: open,
+    onClose,
+  });
 
   const clearFieldError = (field: TaskFormFieldErrorKey) => {
     setErrors((prev) => {
@@ -145,15 +152,6 @@ export function TaskFormModal({
       setSubtaskDraft('');
     }
   }, [open, task, initialStatus, isLeader]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
 
   const handleAddInitialSubtask = () => {
     const clean = subtaskDraft.trim();
@@ -327,6 +325,7 @@ export function TaskFormModal({
           onClick={onClose}
         >
           <motion.div
+            ref={dialogRef}
             key="task-form-dialog"
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -335,8 +334,9 @@ export function TaskFormModal({
             role="dialog"
             aria-modal="true"
             aria-labelledby="task-form-title"
+            tabIndex={-1}
             onClick={(e) => e.stopPropagation()}
-            className="relative flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-slate-800 dark:bg-slate-900"
+            className="relative flex max-h-[90dvh] w-full max-w-2xl flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl focus:outline-none dark:border-slate-800 dark:bg-slate-900"
           >
             {/* Cabecera */}
             <div className="flex items-center justify-between gap-3 border-b border-slate-100 px-4 py-3.5 sm:px-7 sm:py-4 dark:border-slate-800">
@@ -366,7 +366,7 @@ export function TaskFormModal({
                 type="button"
                 onClick={onClose}
                 aria-label="Cerrar modal"
-                className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                className="inline-flex min-h-[36px] min-w-[36px] shrink-0 items-center justify-center rounded-xl p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-200"
               >
                 <X className="h-5 w-5" />
               </button>
@@ -472,7 +472,7 @@ export function TaskFormModal({
                   </label>
                   <div className="relative flex min-w-0 items-center gap-2">
                     <div className="relative min-w-0 flex-1">
-                      <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+                      <Calendar className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500 dark:text-slate-400" />
                       <input
                         id="task-due-input"
                         type="date"
@@ -661,6 +661,9 @@ export function TaskFormModal({
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') {
                           e.preventDefault();
+                          if (e.nativeEvent.isComposing || e.keyCode === 229) {
+                            return;
+                          }
                           handleAddInitialSubtask();
                         }
                       }}
@@ -695,7 +698,7 @@ export function TaskFormModal({
                               setInitialSubtasks((prev) => prev.filter((_, i) => i !== idx))
                             }
                             aria-label="Quitar subtarea"
-                            className="rounded-lg p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40"
+                            className="rounded-lg p-1 text-slate-500 hover:bg-red-50 hover:text-red-600 dark:text-slate-400 dark:hover:bg-red-950/40"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>

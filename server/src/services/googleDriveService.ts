@@ -28,6 +28,10 @@ export interface DriveQuotaInfo {
   userEmail: string | null;
 }
 
+export interface DriveAboutDetails extends DriveQuotaInfo {
+  displayName: string | null;
+}
+
 export interface GoogleDriveAdapter {
   isEnabled(): boolean;
   uploadFile(input: DriveUploadInput): Promise<DriveUploadResult>;
@@ -551,4 +555,43 @@ export async function getDriveStorageQuota(
   }
 
   return inFlightQuotaPromise;
+}
+
+/**
+ * Verificación estricta de solo lectura sobre `/drive/v3/about` para diagnósticos OAuth.
+ * A diferencia de `getDriveStorageQuota`, lanza `HttpError(502)` ante fallos de acceso o permisos.
+ */
+export async function verifyDriveAboutAccess(): Promise<DriveAboutDetails> {
+  const url = `${DRIVE_ABOUT_API}?fields=${encodeURIComponent(
+    'user(emailAddress,displayName),storageQuota'
+  )}`;
+  const response = await fetchWithGoogleAuth(url, {
+    method: 'GET',
+    timeoutMs: 15_000,
+  });
+
+  if (!response.ok) {
+    const detail = await readDriveErrorDetail(response);
+    throw new HttpError(502, `No se pudo verificar el acceso a Google Drive (${detail})`);
+  }
+
+  const data = (await response.json().catch(() => ({}))) as DriveAboutResponse;
+  const rawLimit = data.storageQuota?.limit;
+  const parsedLimit = rawLimit !== undefined && rawLimit !== null ? Number(rawLimit) : null;
+  const limitBytes =
+    parsedLimit !== null && Number.isFinite(parsedLimit) && parsedLimit >= 0
+      ? parsedLimit
+      : null;
+
+  const rawUsage = Number(data.storageQuota?.usage ?? 0);
+  const rawUsageInDrive = Number(data.storageQuota?.usageInDrive ?? 0);
+
+  return {
+    limitBytes,
+    usageBytes: Number.isFinite(rawUsage) && rawUsage >= 0 ? rawUsage : 0,
+    usageInDriveBytes:
+      Number.isFinite(rawUsageInDrive) && rawUsageInDrive >= 0 ? rawUsageInDrive : 0,
+    userEmail: data.user?.emailAddress?.trim() || null,
+    displayName: data.user?.displayName?.trim() || null,
+  };
 }

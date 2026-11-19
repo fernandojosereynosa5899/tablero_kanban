@@ -4,8 +4,9 @@ import type { TaskStatus } from '@prisma/client';
 import { config } from '../config';
 import type { TaskAttachment, UserPublic } from '../types/domain';
 import {
+  assertGoogleOAuthScopes,
   fetchWithGoogleAuth,
-  getGoogleAccessToken,
+  GOOGLE_OAUTH_SCOPES,
   isGoogleOAuthConfigured,
 } from './googleAuthService';
 
@@ -117,7 +118,7 @@ export async function verifyMailConnection(): Promise<boolean> {
     return false;
   }
   if (isGoogleOAuthConfigured()) {
-    await getGoogleAccessToken();
+    await assertGoogleOAuthScopes(GOOGLE_OAUTH_SCOPES);
     return true;
   }
   return verifySmtpConnection();

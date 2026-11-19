@@ -11,6 +11,8 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "prisma generate && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
+    "lint": "npm run typecheck",
     "start": "node dist/src/index.js",
     "start:prod": "prisma db push --skip-generate && node dist/prisma/seed.js && node dist/src/index.js",
     "db:push": "prisma db push",
@@ -20,8 +22,10 @@
     "test:realtime": "tsx scripts/test-realtime.ts",
     "test:attachments": "tsx scripts/test-attachments.ts",
     "test:maintenance": "tsx scripts/test-maintenance.ts",
+    "test:unit": "tsx --test tests/*.test.ts",
     "test": "npm run test:auth && npm run test:realtime && npm run test:attachments && npm run test:maintenance",
-    "google:auth": "tsx scripts/google-oauth-setup.ts"
+    "google:auth": "tsx scripts/google-oauth-setup.ts",
+    "google:verify": "tsx scripts/verify-google-oauth.ts"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

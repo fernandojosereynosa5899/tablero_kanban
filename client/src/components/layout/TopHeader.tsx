@@ -1,6 +1,6 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Calendar, HelpCircle, LogOut, Moon, Sun, Users, Wrench } from 'lucide-react';
+import { Calendar, HelpCircle, LogOut, Moon, Sun, Users, Wifi, WifiOff, Wrench } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
 import { useTheme } from '../../context/ThemeContext';
 import { getRoleLabel, KANBAN_COLUMNS } from '../../types/kanban';
@@ -12,6 +12,10 @@ interface TopHeaderProps {
   onOpenTutorial: () => void;
   onOpenMaintenance?: () => void;
   maintenanceActive?: boolean;
+}
+
+function getLocalDayKey(date: Date): string {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
 }
 
 function formatSpanishDate(date: Date): string {
@@ -31,10 +35,53 @@ export function TopHeader({
   onOpenMaintenance,
   maintenanceActive = false,
 }: TopHeaderProps) {
-  const { user, users, maxUsers, tasks, onlineUserIds, logout } = useAuth();
+  const { user, users, maxUsers, tasks, onlineUserIds, isConnected, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
 
-  const dateLabel = useMemo(() => formatSpanishDate(new Date()), []);
+  const [dayKey, setDayKey] = useState(() => getLocalDayKey(new Date()));
+
+  useEffect(() => {
+    const syncDayKey = () => {
+      const nextKey = getLocalDayKey(new Date());
+      setDayKey((prev) => (prev === nextKey ? prev : nextKey));
+    };
+
+    const scheduleMidnightRefresh = () => {
+      const now = new Date();
+      const nextMidnight = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate() + 1,
+        0,
+        0,
+        1,
+      );
+      const delayMs = Math.max(1000, nextMidnight.getTime() - now.getTime());
+      return window.setTimeout(() => {
+        syncDayKey();
+      }, delayMs);
+    };
+
+    const timerId = scheduleMidnightRefresh();
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncDayKey();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', syncDayKey);
+    return () => {
+      window.clearTimeout(timerId);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', syncDayKey);
+    };
+  }, [dayKey]);
+
+  const dateLabel = useMemo(() => {
+    void dayKey;
+    return formatSpanishDate(new Date());
+  }, [dayKey]);
 
   const stats = useMemo(() => {
     const total = tasks.length;
@@ -134,7 +181,7 @@ export function TopHeader({
           >
             {maintenanceActive ? (
               <span className="relative flex h-2 w-2 shrink-0">
-                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-amber-500 opacity-75" />
+                <span className="absolute inline-flex h-full w-full motion-safe:animate-ping rounded-full bg-amber-500 opacity-75" />
                 <span className="relative inline-flex h-2 w-2 rounded-full bg-amber-500" />
               </span>
             ) : null}
@@ -177,8 +224,24 @@ export function TopHeader({
                   Tablero Kanban
                 </h1>
                 <RoleBadge role={user.role} size="sm" />
-                <span className="hidden md:inline-flex items-center gap-1 rounded-full bg-slate-100/90 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-[#22252C] dark:text-slate-300">
-                  <Calendar className="h-3 w-3 text-blue-500" />
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-semibold ${
+                    isConnected
+                      ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200/80 dark:bg-emerald-500/15 dark:text-emerald-300 dark:ring-emerald-500/30'
+                      : 'bg-amber-50 text-amber-800 ring-1 ring-amber-300/80 dark:bg-amber-500/15 dark:text-amber-200 dark:ring-amber-500/35'
+                  }`}
+                >
+                  {isConnected ? (
+                    <Wifi className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <WifiOff className="h-3 w-3 shrink-0" aria-hidden="true" />
+                  )}
+                  <span>{isConnected ? 'En vivo' : 'Reconectando...'}</span>
+                </span>
+                <span className="hidden md:inline-flex items-center gap-1 rounded-full bg-slate-100/90 px-2.5 py-0.5 text-[11px] font-medium text-slate-700 dark:bg-[#22252C] dark:text-slate-300">
+                  <Calendar className="h-3 w-3 text-blue-600 dark:text-blue-400" aria-hidden="true" />
                   {dateLabel}
                 </span>
                 <span className="hidden xl:inline-flex items-center rounded-full bg-blue-50/90 px-2 py-0.5 text-[10px] font-semibold text-blue-700 ring-1 ring-blue-200/70 dark:bg-blue-500/10 dark:text-blue-300 dark:ring-blue-500/25">
@@ -192,14 +255,14 @@ export function TopHeader({
               </div>
             </div>
 
-            <p className="mt-1 text-[10px] sm:text-[11px] font-bold tracking-wider uppercase text-slate-500 dark:text-zinc-400 leading-snug">
+            <p className="mt-1 text-[10px] sm:text-[11px] font-bold tracking-wider uppercase text-slate-600 dark:text-slate-300 leading-snug">
               VEAMOS CÓMO ESTÁN NUESTROS PROYECTOS Y TAREAS
             </p>
 
             {/* Fecha y periodo en móvil sin punto huérfano */}
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5 md:hidden">
-              <span className="inline-flex items-center gap-1 rounded-md bg-slate-100/90 px-2 py-0.5 text-[10px] font-medium text-slate-600 dark:bg-[#22252C] dark:text-zinc-300">
-                <Calendar className="h-3 w-3 text-blue-500 shrink-0" />
+              <span className="inline-flex items-center gap-1 rounded-md bg-slate-100/90 px-2 py-0.5 text-[10px] font-medium text-slate-700 dark:bg-[#22252C] dark:text-slate-300">
+                <Calendar className="h-3 w-3 text-blue-600 dark:text-blue-400 shrink-0" aria-hidden="true" />
                 <span>{dateLabel}</span>
               </span>
               <span className="inline-flex items-center rounded-md bg-blue-50/90 px-2 py-0.5 text-[10px] font-semibold text-blue-700 ring-1 ring-blue-200/70 dark:bg-blue-500/10 dark:text-blue-300 dark:ring-blue-500/25">
@@ -238,7 +301,7 @@ export function TopHeader({
                 </span>
               </div>
 
-              <div className="hidden md:flex flex-wrap items-center gap-2 text-[11px] text-slate-500 dark:text-slate-400">
+              <div className="hidden md:flex flex-wrap items-center gap-2 text-[11px] text-slate-600 dark:text-slate-300">
                 {KANBAN_COLUMNS.map((col) => (
                   <span key={col.status} className="inline-flex items-center gap-1">
                     <span
@@ -246,7 +309,7 @@ export function TopHeader({
                       style={{ backgroundColor: col.color }}
                     />
                     <span>{col.label}:</span>
-                    <strong className="text-slate-700 dark:text-slate-200">
+                    <strong className="text-slate-800 dark:text-slate-100">
                       {stats.byStatus[col.status]}
                     </strong>
                   </span>
@@ -266,7 +329,7 @@ export function TopHeader({
 
           {/* Burbujas en vivo de los 6 usuarios */}
           <div className="min-w-0 md:col-span-5 flex items-center justify-between md:justify-end gap-2">
-            <span className="text-[11px] font-medium text-slate-500 dark:text-zinc-400 shrink-0">
+            <span className="text-[11px] font-medium text-slate-600 dark:text-slate-300 shrink-0">
               Conectados ({onlineCount}/{users.length})
             </span>
 
@@ -299,7 +362,7 @@ export function TopHeader({
                       {/* Punto de presencia en vivo */}
                       <span className="absolute -bottom-0.5 -right-0.5 flex h-2.5 w-2.5 items-center justify-center">
                         {isOnline ? (
-                          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75" />
+                          <span className="absolute inline-flex h-full w-full motion-safe:animate-ping rounded-full bg-emerald-400 opacity-75" />
                         ) : null}
                         <span
                           className={`relative inline-flex h-2 w-2 rounded-full ring-2 ring-white dark:ring-[#181A1F] ${
@@ -314,7 +377,7 @@ export function TopHeader({
                       role="tooltip"
                       className={`pointer-events-none absolute ${
                         index >= 2 ? 'right-0' : 'left-0'
-                      } md:left-1/2 md:right-auto md:-translate-x-1/2 top-full mt-2 z-50 hidden w-max max-w-[260px] rounded-xl border border-slate-200 bg-slate-900 px-3 py-2 text-xs text-white shadow-xl group-hover:block group-focus-within:block dark:border-slate-700 dark:bg-slate-800`}
+                      } md:left-1/2 md:right-auto md:-translate-x-1/2 top-full mt-2 z-50 hidden w-max max-w-[calc(100vw-2rem)] sm:max-w-[260px] rounded-xl border border-slate-200 bg-slate-900 px-3 py-2 text-xs text-white shadow-xl group-hover:block group-focus-within:block dark:border-slate-700 dark:bg-slate-800`}
                     >
                       <div className="font-semibold leading-snug">
                         {member.displayName} {isSelf ? '(Tú)' : ''}

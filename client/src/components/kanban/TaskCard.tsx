@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { memo, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import {
@@ -14,6 +14,7 @@ import {
   Users,
 } from 'lucide-react';
 import {
+  canUserMoveTask,
   DEFAULT_POSTIT_COLOR,
   isTaskIncompleteOverdue,
   KANBAN_COLUMNS,
@@ -44,24 +45,16 @@ function hexToRgba(hex: string, alpha: number): string {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function formatDueDate(iso: string): { label: string; isOverdue: boolean } {
+function formatDueDateLabel(iso: string): string {
   const date = new Date(iso);
-  const now = new Date();
-  const isOverdue = date.getTime() < now.getTime();
-  const label = new Intl.DateTimeFormat('es-ES', {
+  return new Intl.DateTimeFormat('es-ES', {
     day: 'numeric',
     month: 'short',
     timeZone: 'UTC',
   }).format(date);
-  return { label, isOverdue };
 }
 
-export function canUserMoveTask(task: Task, userId: string, role: Role): boolean {
-  if (role === 'LEADER') return true;
-  return (task.assignedToAll || task.assigneeId === userId) && task.status !== 'APPROVED';
-}
-
-export function TaskCard({
+export const TaskCard = memo(function TaskCard({
   task,
   currentUserId,
   currentUserRole,
@@ -71,6 +64,7 @@ export function TaskCard({
 }: TaskCardProps) {
   const [moveMenuOpen, setMoveMenuOpen] = useState(false);
   const moveMenuRef = useRef<HTMLDivElement | null>(null);
+  const moveTriggerRef = useRef<HTMLButtonElement | null>(null);
 
   const canMove = canUserMoveTask(task, currentUserId, currentUserRole);
 
@@ -97,8 +91,20 @@ export function TaskCard({
         setMoveMenuOpen(false);
       }
     };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        event.stopPropagation();
+        setMoveMenuOpen(false);
+        moveTriggerRef.current?.focus();
+      }
+    };
     document.addEventListener('mousedown', handleOutside);
-    return () => document.removeEventListener('mousedown', handleOutside);
+    document.addEventListener('keydown', handleEscape, true);
+    return () => {
+      document.removeEventListener('mousedown', handleOutside);
+      document.removeEventListener('keydown', handleEscape, true);
+    };
   }, [moveMenuOpen]);
 
   const style: CSSProperties | undefined = isOverlay
@@ -118,14 +124,15 @@ export function TaskCard({
     return { total, done, pct };
   }, [task.subtasks]);
 
+  const isIncompleteOverdue = isTaskIncompleteOverdue(task);
+
   const dueInfo = useMemo(() => {
     if (!task.dueDate) return null;
-    const { label, isOverdue } = formatDueDate(task.dueDate);
     return {
-      label,
-      isOverdue: isOverdue && task.status !== 'APPROVED',
+      label: formatDueDateLabel(task.dueDate),
+      isOverdue: isIncompleteOverdue,
     };
-  }, [task.dueDate, task.status]);
+  }, [task.dueDate, isIncompleteOverdue]);
 
   const permittedTargets = useMemo(() => {
     return KANBAN_COLUMNS.filter((col) => {
@@ -221,27 +228,39 @@ export function TaskCard({
                 onClick={(e) => e.stopPropagation()}
                 onPointerDown={(e) => e.stopPropagation()}
                 onTouchStart={(e) => e.stopPropagation()}
+                onKeyDown={(e) => {
+                  if (moveMenuOpen) {
+                    e.stopPropagation();
+                  }
+                }}
               >
                 <button
+                  ref={moveTriggerRef}
                   type="button"
                   onClick={() => setMoveMenuOpen((prev) => !prev)}
                   title="Mover de columna"
                   aria-label="Mover tarea a otra columna"
+                  aria-haspopup="menu"
                   aria-expanded={moveMenuOpen}
-                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-1.5 text-slate-500 transition hover:bg-black/10 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
+                  className="inline-flex min-h-[36px] min-w-[36px] items-center justify-center rounded-xl p-1.5 text-slate-600 transition hover:bg-black/10 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-white/10 dark:hover:text-white"
                 >
                   <ArrowRightLeft className="h-4 w-4" />
                 </button>
 
                 {moveMenuOpen ? (
-                  <div className="absolute right-0 top-full z-50 mt-1 w-48 rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-900">
-                    <p className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  <div
+                    role="menu"
+                    aria-label="Mover a columna"
+                    className="absolute right-0 top-full z-50 mt-1 w-48 rounded-xl border border-slate-200 bg-white p-1.5 shadow-2xl dark:border-slate-700 dark:bg-slate-900"
+                  >
+                    <p className="px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400">
                       Mover a:
                     </p>
                     {permittedTargets.map((col) => (
                       <button
                         key={col.status}
                         type="button"
+                        role="menuitem"
                         onClick={() => {
                           setMoveMenuOpen(false);
                           onQuickMove(task, col.status);
@@ -263,7 +282,7 @@ export function TaskCard({
             {canMove ? (
               <GripVertical
                 aria-hidden="true"
-                className="h-4 w-4 text-slate-400/80 opacity-70 transition group-hover:opacity-100 dark:text-slate-500"
+                className="h-4 w-4 text-slate-500 opacity-75 transition group-hover:opacity-100 dark:text-slate-400"
               />
             ) : null}
           </div>
@@ -320,7 +339,7 @@ export function TaskCard({
                 </span>
               ) : null}
 
-              {isTaskIncompleteOverdue(task) ? (
+              {isIncompleteOverdue ? (
                 <span
                   title="Esta tarea venció y aún no ha sido completada"
                   className="inline-flex items-center gap-1 rounded-lg bg-rose-600/15 px-1.5 py-0.5 text-[10px] font-bold text-rose-700 ring-1 ring-rose-500/35 dark:bg-rose-500/25 dark:text-rose-200"
@@ -411,4 +430,4 @@ export function TaskCard({
       </div>
     </article>
   );
-}
+});

@@ -3,20 +3,43 @@ import { Prisma } from '@prisma/client';
 import multer from 'multer';
 import { ZodError } from 'zod';
 import { HttpError } from '../utils/errors';
+import { extractSafePath, logger, redactSensitiveText } from '../utils/logger';
 import { formatZodError } from '../utils/validation';
+import { getClientIp } from './rateLimit';
 
 export function apiNotFoundHandler(_req: Request, res: Response): void {
   res.status(404).json({ error: 'Ruta de API no encontrada' });
 }
 
-export function errorHandler(err: unknown, _req: Request, res: Response, _next: NextFunction): void {
+export function errorHandler(err: unknown, req: Request, res: Response, _next: NextFunction): void {
   if (err instanceof HttpError) {
+    if (err.statusCode === 403 && err.message.includes('CORS')) {
+      logger.warn('http.cors_rejected', {
+        requestId: req.requestId ?? null,
+        method: req.method,
+        path: extractSafePath(req),
+        ip: getClientIp(req),
+        statusCode: 403,
+        message: err.message,
+      });
+    }
     res.status(err.statusCode).json({ error: err.message });
     return;
   }
 
   if (err instanceof ZodError) {
     res.status(400).json({ error: formatZodError(err) });
+    return;
+  }
+
+  if (
+    typeof err === 'object' &&
+    err !== null &&
+    (('type' in err && (err as { type?: unknown }).type === 'entity.too.large') ||
+      ('status' in err && (err as { status?: unknown }).status === 413) ||
+      ('statusCode' in err && (err as { statusCode?: unknown }).statusCode === 413))
+  ) {
+    res.status(413).json({ error: 'El cuerpo de la solicitud supera el límite máximo permitido' });
     return;
   }
 
@@ -54,6 +77,14 @@ export function errorHandler(err: unknown, _req: Request, res: Response, _next: 
     }
   }
 
-  console.error('[errorHandler]', err instanceof Error ? err.message : err);
+  logger.error('http.unhandled_error', {
+    requestId: req.requestId ?? null,
+    method: req.method,
+    path: extractSafePath(req),
+    ip: getClientIp(req),
+    userId: req.user?.id ?? null,
+    errorName: err instanceof Error ? err.name : 'UnknownError',
+    message: redactSensitiveText(err instanceof Error ? err.message : String(err)),
+  });
   res.status(500).json({ error: 'Error interno del servidor' });
 }

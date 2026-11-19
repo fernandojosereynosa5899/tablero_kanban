@@ -150,17 +150,22 @@ El servidor calcula el estado efectivo (`GET /api/maintenance/status`) siguiendo
 
 ## 9. Arquitectura Híbrida recomendada: Frontend en Vercel + Backend en Render
 
-Si deseas servir la interfaz React/Vite desde el CDN global de **Vercel** conservando el servidor Express + Socket.IO + Google Drive Proxy en **Render** (sin afectar WebSockets, presencia en memoria ni el límite de `5 MB` en adjuntos):
+Si sirves la interfaz React/Vite desde el CDN global de **Vercel** conservando el servidor Express + Socket.IO + Google Drive Proxy en **Render** (sin afectar WebSockets, presencia en memoria ni el límite de `5 MB` en adjuntos):
 
-1. **Variables en Render (Backend `tablero-kanban`):**
+1. **Variables en Render (Backend `tablero-kanban-th2h`):**
    - Mantén las mismas claves del backend (`DATABASE_URL`, `JWT_SECRET` de al menos 32 caracteres — recomendado 64 hex, `NODE_ENV=production`, `ATTACHMENTS_QUOTA_MB=512`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, `GOOGLE_DRIVE_ROOT_FOLDER`, `MAIL_NOTIFY_TO`).
    - Actualiza `CLIENT_ORIGIN` al dominio productivo de Vercel sin barra diagonal final (ej. `https://tu-tablero.vercel.app`).
-   - Opcional: configura `ALLOWED_ORIGINS` (separado por comas) si usas despliegues *Preview* de Vercel o un dominio personalizado (ej. `https://tu-tablero-*.vercel.app,https://tudominio.com`).
+   - Configura `ALLOWED_ORIGINS` (separado por comas) si usas despliegues *Preview* de Vercel o un dominio personalizado (ej. `https://tu-tablero-*.vercel.app,https://tudominio.com`). El backend valida comodines seguros con al menos 2 etiquetas de dominio fijas.
 2. **Proyecto en Vercel (Frontend Vite):**
    - Conecta el repositorio en Vercel (`vercel.json` en raíz y `client/vercel.json` soportan tanto raíz `.` como *Root Directory* = `client`).
-   - Agrega la variable de entorno en Vercel:
-     - `VITE_API_URL` = `https://tablero-kanban-th2h.onrender.com` *(URL HTTPS de tu backend en Render, sin `/` al final)*.
-   - Al redesplegar Vercel, toda llamada REST (`/api/*`), descarga/vista previa Proxy (`/api/attachments/:id/download`) y Socket.IO en tiempo real apuntarán automáticamente al backend en Render manteniendo las mismas pantallas, permisos y ventana de mantenimiento.
+   - En **Vercel Dashboard → Project Settings → Environment Variables**, agrega:
+     - **Name**: `VITE_API_URL`
+     - **Value**: `https://tablero-kanban-th2h.onrender.com` *(URL HTTPS de tu backend en Render, sin `/` al final)*
+     - **Type**: **`Config`** (⚠️ **NO `Secret`**)
+     - **Environments**: **Production**, **Preview** y **Development**
+   - **¿Por qué `Config` y no `Secret`?** Vite incrusta todas las variables con prefijo `VITE_` en el código JavaScript público del navegador durante el `build`. Por ello Vercel muestra la advertencia *"Remove the public framework prefix to keep this value private... If that's safe, change the variable to Config"*. La URL pública del backend es segura como `Config`; **nunca** agregues secretos (`JWT_SECRET`, `DATABASE_URL`, `GOOGLE_CLIENT_SECRET`, `GOOGLE_REFRESH_TOKEN`, etc.) con prefijo `VITE_` ni en Vercel.
+   - **Redeploy obligatorio:** como `VITE_API_URL` se compila en tiempo de build, tras crear o editar la variable en Vercel debes lanzar un **Redeploy** (sin caché o nuevo deployment) para que surta efecto.
+   - Al redesplegar Vercel, toda llamada REST (`/api/*`), descarga/vista previa Proxy (`/api/attachments/:id/download`) y Socket.IO en tiempo real apuntarán automáticamente al backend en Render manteniendo las mismas pantallas, permisos, recuperación ante *cold start* de Render Free y ventana de mantenimiento.
 
 ## 10. Cómo probar Google Drive privado + Gmail HTTPS
 

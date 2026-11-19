@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
   AlertTriangle,
@@ -13,8 +13,9 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useAuth } from '../../context/AuthContext';
+import { useFocusTrap } from '../../hooks/useFocusTrap';
 import { ApiError } from '../../lib/api';
-import { getMaintenanceSourceLabel } from './MaintenanceScreen';
+import { getMaintenanceSourceLabel } from '../../types/kanban';
 
 interface MaintenanceModalProps {
   open: boolean;
@@ -35,6 +36,14 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
   const [submittingAction, setSubmittingAction] = useState<'activate' | 'update' | 'disable' | null>(
     null,
   );
+  const dialogRef = useRef<HTMLDivElement | null>(null);
+  const isBusy = submittingAction !== null;
+
+  useFocusTrap(dialogRef, {
+    enabled: open && Boolean(user && user.role === 'LEADER'),
+    onClose,
+    canClose: !isBusy,
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -50,24 +59,12 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && !submittingAction) {
-        onClose();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose, submittingAction]);
-
   if (!user || user.role !== 'LEADER') return null;
 
   const isActive = Boolean(maintenanceStatus?.active);
   const source = maintenanceStatus?.source ?? 'none';
   const canDisableInApp = maintenanceStatus?.canDisableInApp ?? true;
   const isForcedExternal = isActive && !canDisableInApp && (source === 'env' || source === 'file');
-  const isBusy = submittingAction !== null;
 
   const parseFormValues = (): {
     title: string;
@@ -172,6 +169,7 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
           }}
         >
           <motion.div
+            ref={dialogRef}
             key="maintenance-modal-dialog"
             initial={{ opacity: 0, scale: 0.96, y: 12 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
@@ -180,7 +178,8 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
             role="dialog"
             aria-modal="true"
             aria-labelledby="maintenance-modal-title"
-            className="relative w-full max-w-xl max-h-[90dvh] flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl dark:border-[#2D3038] dark:bg-[#181A1F]"
+            tabIndex={-1}
+            className="relative w-full max-w-xl max-h-[90dvh] flex flex-col overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-2xl focus:outline-none dark:border-[#2D3038] dark:bg-[#181A1F]"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Cabecera */}
@@ -213,7 +212,7 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
                 onClick={onClose}
                 disabled={isBusy}
                 aria-label="Cerrar modal de mantenimiento"
-                className="inline-flex h-8 w-8 items-center justify-center rounded-xl text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 disabled:opacity-50 dark:hover:bg-[#22252C] dark:hover:text-slate-200"
+                className="inline-flex h-8 w-8 items-center justify-center rounded-xl text-slate-500 transition hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50 dark:text-slate-400 dark:hover:bg-[#22252C] dark:hover:text-slate-200"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -233,7 +232,7 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
                   <div className="flex items-center gap-2">
                     <span
                       className={`inline-flex h-2.5 w-2.5 rounded-full ${
-                        isActive ? 'bg-amber-500 animate-pulse' : 'bg-emerald-500'
+                        isActive ? 'bg-amber-500 motion-safe:animate-pulse' : 'bg-emerald-500'
                       }`}
                     />
                     <span
@@ -293,7 +292,7 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
                   >
                     Título visible
                   </label>
-                  <span className="text-[11px] text-slate-400 dark:text-slate-500">
+                  <span className="text-[11px] text-slate-600 dark:text-slate-400">
                     {title.trim().length}/100
                   </span>
                 </div>
@@ -318,7 +317,7 @@ export function MaintenanceModal({ open, onClose }: MaintenanceModalProps) {
                   >
                     Mensaje para el equipo
                   </label>
-                  <span className="text-[11px] text-slate-400 dark:text-slate-500">
+                  <span className="text-[11px] text-slate-600 dark:text-slate-400">
                     {message.trim().length}/400
                   </span>
                 </div>

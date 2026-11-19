@@ -604,54 +604,48 @@ export async function deleteTaskAttachment(
   freedBytes: number;
   removedFromDrive: boolean;
 }> {
-  const existing = await prisma.taskAttachment.findUnique({
-    where: { id: attachmentId },
-    include: {
-      task: {
-        select: { id: true, title: true, status: true },
-      },
-    },
-  });
-
-  if (!existing) {
-    throw new HttpError(404, 'Archivo adjunto no encontrado');
-  }
-
-  const canDelete = actor.role === Role.LEADER || existing.uploadedById === actor.id;
-  if (!canDelete) {
-    await recordSecurityEvent({
-      userId: actor.id,
-      username: actor.username,
-      eventType: 'unauthorized_action',
-      details: { action: 'deleteTaskAttachment', attachmentId, taskId: existing.taskId },
-    });
-    throw new HttpError(
-      403,
-      buildForbiddenMessage(actor, 'Solo el líder o quien subió el archivo puede eliminarlo')
-    );
-  }
-
-  if (existing.task.status === TaskStatus.APPROVED && actor.role !== Role.LEADER) {
-    await recordSecurityEvent({
-      userId: actor.id,
-      username: actor.username,
-      eventType: 'unauthorized_action',
-      details: { action: 'deleteTaskAttachment_approved', attachmentId, taskId: existing.taskId },
-    });
-    throw new HttpError(
-      403,
-      buildForbiddenMessage(actor, 'No puedes eliminar archivos de una tarea ya aprobada')
-    );
-  }
-
-  let removedFromDrive = false;
-  if (existing.storageProvider === 'gdrive' && existing.driveFileId) {
-    await deleteAttachmentFromDrive(existing.driveFileId);
-    removedFromDrive = true;
-  }
-
   const txResult = await prisma.$transaction(
     async (tx) => {
+      const existing = await tx.taskAttachment.findUnique({
+        where: { id: attachmentId },
+        include: {
+          task: {
+            select: { id: true, title: true, status: true },
+          },
+        },
+      });
+
+      if (!existing) {
+        throw new HttpError(404, 'Archivo adjunto no encontrado');
+      }
+
+      const canDelete = actor.role === Role.LEADER || existing.uploadedById === actor.id;
+      if (!canDelete) {
+        void recordSecurityEvent({
+          userId: actor.id,
+          username: actor.username,
+          eventType: 'unauthorized_action',
+          details: { action: 'deleteTaskAttachment', attachmentId, taskId: existing.taskId },
+        });
+        throw new HttpError(
+          403,
+          buildForbiddenMessage(actor, 'Solo el líder o quien subió el archivo puede eliminarlo')
+        );
+      }
+
+      if (existing.task.status === TaskStatus.APPROVED && actor.role !== Role.LEADER) {
+        void recordSecurityEvent({
+          userId: actor.id,
+          username: actor.username,
+          eventType: 'unauthorized_action',
+          details: { action: 'deleteTaskAttachment_approved', attachmentId, taskId: existing.taskId },
+        });
+        throw new HttpError(
+          403,
+          buildForbiddenMessage(actor, 'No puedes eliminar archivos de una tarea ya aprobada')
+        );
+      }
+
       const deleted = await tx.taskAttachment.deleteMany({
         where: { id: attachmentId },
       });
@@ -684,6 +678,8 @@ export async function deleteTaskAttachment(
         taskId: existing.taskId,
         activity,
         gc,
+        storageProvider: existing.storageProvider,
+        driveFileId: existing.driveFileId,
       };
     },
     {
@@ -691,6 +687,19 @@ export async function deleteTaskAttachment(
       timeout: 30_000,
     }
   );
+
+  let removedFromDrive = false;
+  if (txResult.storageProvider === 'gdrive' && txResult.driveFileId && isGoogleDriveEnabled()) {
+    try {
+      await deleteAttachmentFromDrive(txResult.driveFileId);
+      removedFromDrive = true;
+    } catch (err) {
+      console.warn(
+        `[attachmentService] DB eliminó adjunto ${attachmentId}, pero falló la limpieza en Google Drive:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
 
   emitEvent('attachment:deleted', {
     taskId: txResult.taskId,

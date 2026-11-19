@@ -33,6 +33,9 @@ interface AuthContextValue {
   tasks: Task[];
   setTasks: Dispatch<SetStateAction<Task[]>>;
   isLoading: boolean;
+  bootstrapError: string | null;
+  isRetryingSession: boolean;
+  retrySession: () => Promise<void>;
   isConnected: boolean;
   onlineUserIds: string[];
   socket: KanbanSocket | null;
@@ -45,18 +48,32 @@ interface AuthContextValue {
   updateMaintenance: (input: UpdateMaintenanceInput) => Promise<MaintenanceStatus>;
   updateProfile: (input: UpdateMeInput) => Promise<UserPublic>;
   updateMyPassword: (currentPassword: string, newPassword: string) => Promise<void>;
+  registerCommentCreated: (taskId: string, commentId: string) => void;
+  registerCommentDeleted: (taskId: string, commentId: string) => void;
+  registerAttachmentCreated: (taskId: string, attachmentId: string) => void;
+  registerAttachmentDeleted: (taskId: string, attachmentId: string) => void;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 function sortUsersBySlot(list: UserPublic[]): UserPublic[] {
-  return [...list].sort((a, b) => a.slot - b.slot);
+  return list.toSorted((a, b) => a.slot - b.slot);
 }
 
 function upsertTask(list: Task[], incoming: Task): Task[] {
   const idx = list.findIndex((t) => t.id === incoming.id);
   const next = idx === -1 ? [...list, incoming] : list.map((t, i) => (i === idx ? incoming : t));
-  return [...next].sort((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
+  return next.toSorted((a, b) => a.position - b.position || a.createdAt.localeCompare(b.createdAt));
+}
+
+function trackBounded(bucket: Set<string>, id: string): boolean {
+  if (bucket.has(id)) return false;
+  bucket.add(id);
+  if (bucket.size > 400) {
+    const first = bucket.values().next().value;
+    if (first) bucket.delete(first);
+  }
+  return true;
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -69,14 +86,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [maxUsers, setMaxUsers] = useState<number>(MAX_USERS);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  const [isRetryingSession, setIsRetryingSession] = useState<boolean>(false);
   const [isConnected, setIsConnected] = useState<boolean>(false);
   const [onlineUserIds, setOnlineUserIds] = useState<string[]>([]);
   const [socket, setSocket] = useState<KanbanSocket | null>(null);
   const [maintenanceStatus, setMaintenanceStatus] = useState<MaintenanceStatus | null>(null);
 
   const socketRef = useRef<KanbanSocket | null>(null);
+  const tokenRef = useRef<string | null>(token);
+  const userRef = useRef<UserPublic | null>(user);
+  tokenRef.current = token;
+  userRef.current = user;
   const suppressRevokeRef = useRef<boolean>(false);
   const prevMaintenanceActiveRef = useRef<boolean>(false);
+  const isResyncingRef = useRef<boolean>(false);
+  const bootstrapInFlightRef = useRef<Promise<void> | null>(null);
+  const unauthorizedNotifiedRef = useRef<boolean>(false);
+
+  const seenCreatedCommentIdsRef = useRef<Set<string>>(new Set());
+  const seenDeletedCommentIdsRef = useRef<Set<string>>(new Set());
+  const seenCreatedAttachmentIdsRef = useRef<Set<string>>(new Set());
+  const seenDeletedAttachmentIdsRef = useRef<Set<string>>(new Set());
 
   const clearSession = useCallback(() => {
     if (socketRef.current) {
@@ -93,6 +124,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setUsers([]);
     setTasks([]);
+    setBootstrapError(null);
+    seenCreatedCommentIdsRef.current.clear();
+    seenDeletedCommentIdsRef.current.clear();
+    seenCreatedAttachmentIdsRef.current.clear();
+    seenDeletedAttachmentIdsRef.current.clear();
   }, []);
 
   const logout = useCallback(
@@ -126,6 +162,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
+      if (unauthorizedNotifiedRef.current) return;
+      unauthorizedNotifiedRef.current = true;
       clearSession();
       toast.error('Tu sesión expiró. Inicia sesión nuevamente.');
     });
@@ -154,55 +192,161 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setTasks(list);
   }, []);
 
-  // Validación inicial de token guardado y estado de mantenimiento
-  useEffect(() => {
-    let active = true;
+  const registerCommentCreated = useCallback((taskId: string, commentId: string) => {
+    if (!trackBounded(seenCreatedCommentIdsRef.current, commentId)) return;
+    setTasks((prev) =>
+      prev.map((t) => (t.id === taskId ? { ...t, commentCount: t.commentCount + 1 } : t)),
+    );
+  }, []);
 
-    async function bootstrap() {
+  const registerCommentDeleted = useCallback((taskId: string, commentId: string) => {
+    if (!trackBounded(seenDeletedCommentIdsRef.current, commentId)) return;
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId ? { ...t, commentCount: Math.max(0, t.commentCount - 1) } : t,
+      ),
+    );
+  }, []);
+
+  const registerAttachmentCreated = useCallback((taskId: string, attachmentId: string) => {
+    if (!trackBounded(seenCreatedAttachmentIdsRef.current, attachmentId)) return;
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId ? { ...t, attachmentCount: (t.attachmentCount ?? 0) + 1 } : t,
+      ),
+    );
+  }, []);
+
+  const registerAttachmentDeleted = useCallback((taskId: string, attachmentId: string) => {
+    if (!trackBounded(seenDeletedAttachmentIdsRef.current, attachmentId)) return;
+    setTasks((prev) =>
+      prev.map((t) =>
+        t.id === taskId ? { ...t, attachmentCount: Math.max(0, (t.attachmentCount ?? 0) - 1) } : t,
+      ),
+    );
+  }, []);
+
+  const loadSession = useCallback(
+    async (isActiveCheck?: () => boolean): Promise<void> => {
+      const stillActive = () => (isActiveCheck ? isActiveCheck() : true);
       const statusPromise = api.getMaintenanceStatus().catch(() => null);
       const storedToken = window.localStorage.getItem(TOKEN_STORAGE_KEY);
+
       if (!storedToken) {
         setApiAuthToken(null);
+        setToken(null);
+        setUser(null);
+        setBootstrapError(null);
         const status = await statusPromise;
-        if (!active) return;
+        if (!stillActive()) return;
         if (status) {
           setMaintenanceStatus((prev) => status ?? prev);
         }
-        setIsLoading(false);
         return;
       }
 
+      unauthorizedNotifiedRef.current = false;
       setApiAuthToken(storedToken);
+      setToken(storedToken);
+
       try {
-        const [status, me, usersRes, tasksList] = await Promise.all([
-          statusPromise,
-          api.getMe(),
-          api.listUsers(),
-          api.listTasks(),
-        ]);
-        if (!active) return;
+        const [status, me] = await Promise.all([statusPromise, api.getMe()]);
+        if (!stillActive()) return;
         if (status) {
           setMaintenanceStatus((prev) => status ?? prev);
         }
+
+        const [usersRes, tasksList] = await Promise.all([api.listUsers(), api.listTasks()]);
+        if (!stillActive()) return;
+
         setToken(storedToken);
         setUser(me);
         setUsers(sortUsersBySlot(usersRes.users));
         setMaxUsers(usersRes.maxUsers);
         setTasks(tasksList);
+        setBootstrapError(null);
       } catch (err) {
-        if (!active) return;
+        if (!stillActive()) return;
         const status = await statusPromise;
-        if (!active) return;
-        if (status) {
-          setMaintenanceStatus((prev) => status ?? prev);
+        if (!stillActive()) return;
+        if (status?.active) {
+          setMaintenanceStatus(status);
+        } else if (status) {
+          setMaintenanceStatus((prev) => (prev?.active ? prev : status));
         }
-        if (err instanceof ApiError && err.status === 503) {
+
+        const isMaintenanceError =
+          (err instanceof ApiError && err.status === 503) || Boolean(status?.active);
+        const isAuthRejected = err instanceof ApiError && (err.status === 401 || err.status === 403);
+
+        if (isMaintenanceError) {
           // Conservar el token para recuperar la sesión al finalizar la ventana de mantenimiento
+          const fallbackMaintenance: MaintenanceStatus = {
+            active: true,
+            source: 'database',
+            canDisableInApp: true,
+            title: 'Tablero Kanban en mantenimiento',
+            message: err instanceof ApiError ? err.message : 'Estamos aplicando mejoras en el servidor.',
+            estimatedMinutes: null,
+            updatedByName: null,
+            updatedAt: new Date().toISOString(),
+          };
+          setApiAuthToken(storedToken);
           setToken(storedToken);
           setUser(null);
-        } else {
+          setBootstrapError(null);
+          setMaintenanceStatus((prev) => {
+            if (prev?.active) return prev;
+            if (status?.active) return status;
+            return fallbackMaintenance;
+          });
+        } else if (isAuthRejected) {
           clearSession();
+        } else {
+          // Error transitorio (cold start en Render, red, timeout, 5xx, HTML): conservar token para reintentar
+          setApiAuthToken(storedToken);
+          setToken(storedToken);
+          setUser(null);
+          const message =
+            err instanceof ApiError
+              ? err.message
+              : 'No se pudo conectar con el servidor. Es posible que esté iniciando en Render.';
+          setBootstrapError(message);
         }
+      }
+    },
+    [clearSession],
+  );
+
+  const retrySession = useCallback(async (): Promise<void> => {
+    setIsRetryingSession(true);
+    try {
+      await loadSession();
+    } finally {
+      setIsRetryingSession(false);
+    }
+  }, [loadSession]);
+
+  const refreshMaintenanceAndRecover = useCallback(async (): Promise<MaintenanceStatus | null> => {
+    const status = await refreshMaintenance();
+    if (status && !status.active && tokenRef.current && !userRef.current) {
+      await loadSession();
+    }
+    return status;
+  }, [refreshMaintenance, loadSession]);
+
+  // Validación inicial de token guardado y estado de mantenimiento
+  useEffect(() => {
+    let active = true;
+
+    async function bootstrap() {
+      try {
+        if (!bootstrapInFlightRef.current) {
+          bootstrapInFlightRef.current = loadSession().finally(() => {
+            bootstrapInFlightRef.current = null;
+          });
+        }
+        await bootstrapInFlightRef.current;
       } finally {
         if (active) setIsLoading(false);
       }
@@ -212,7 +356,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       active = false;
     };
-  }, [clearSession]);
+  }, [loadSession]);
 
   // Conexión Socket.IO cuando hay usuario y token válidos
   useEffect(() => {
@@ -228,9 +372,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
+    let hasConnectedBefore = false;
+
     const activeSocket = createKanbanSocket(token, {
       onConnect: () => {
         setIsConnected(true);
+        if (hasConnectedBefore && !isResyncingRef.current) {
+          isResyncingRef.current = true;
+          void Promise.allSettled([
+            refreshTasks(),
+            refreshUsers(),
+            refreshMaintenance(),
+          ]).finally(() => {
+            isResyncingRef.current = false;
+          });
+        }
+        hasConnectedBefore = true;
       },
       onDisconnect: () => {
         setIsConnected(false);
@@ -306,53 +463,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setTasks((prev) => prev.filter((t) => t.id !== id));
     });
 
-    const seenCreatedCommentIds = new Set<string>();
-    const seenDeletedCommentIds = new Set<string>();
-    const seenCreatedAttachmentIds = new Set<string>();
-    const seenDeletedAttachmentIds = new Set<string>();
-
-    const trackBounded = (bucket: Set<string>, id: string): boolean => {
-      if (bucket.has(id)) return false;
-      bucket.add(id);
-      if (bucket.size > 400) {
-        const first = bucket.values().next().value;
-        if (first) bucket.delete(first);
-      }
-      return true;
-    };
-
     activeSocket.on('comment:created', ({ taskId, comment }) => {
-      if (!trackBounded(seenCreatedCommentIds, comment.id)) return;
-      setTasks((prev) =>
-        prev.map((t) => (t.id === taskId ? { ...t, commentCount: t.commentCount + 1 } : t)),
-      );
+      registerCommentCreated(taskId, comment.id);
     });
 
     activeSocket.on('comment:deleted', ({ taskId, id }) => {
-      if (!trackBounded(seenDeletedCommentIds, id)) return;
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === taskId ? { ...t, commentCount: Math.max(0, t.commentCount - 1) } : t,
-        ),
-      );
+      registerCommentDeleted(taskId, id);
     });
 
     activeSocket.on('attachment:created', ({ taskId, attachment }) => {
-      if (!trackBounded(seenCreatedAttachmentIds, attachment.id)) return;
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === taskId ? { ...t, attachmentCount: (t.attachmentCount ?? 0) + 1 } : t,
-        ),
-      );
+      registerAttachmentCreated(taskId, attachment.id);
     });
 
     activeSocket.on('attachment:deleted', ({ taskId, id }) => {
-      if (!trackBounded(seenDeletedAttachmentIds, id)) return;
-      setTasks((prev) =>
-        prev.map((t) =>
-          t.id === taskId ? { ...t, attachmentCount: Math.max(0, (t.attachmentCount ?? 0) - 1) } : t,
-        ),
-      );
+      registerAttachmentDeleted(taskId, id);
     });
 
     socketRef.current = activeSocket;
@@ -368,7 +492,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setSocket(null);
       setIsConnected(false);
     };
-  }, [token, user?.id, clearSession, refreshMaintenance]);
+  }, [
+    token,
+    user?.id,
+    clearSession,
+    refreshMaintenance,
+    refreshTasks,
+    refreshUsers,
+    registerCommentCreated,
+    registerCommentDeleted,
+    registerAttachmentCreated,
+    registerAttachmentDeleted,
+  ]);
 
   // Recuperar tablero y sesión automáticamente cuando termina la ventana de mantenimiento
   useEffect(() => {
@@ -381,17 +516,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     if (!user) {
-      setApiAuthToken(token);
-      Promise.all([api.getMe(), api.listUsers(), api.listTasks()])
-        .then(([me, usersRes, tasksList]) => {
-          setUser(me);
-          setUsers(sortUsersBySlot(usersRes.users));
-          setMaxUsers(usersRes.maxUsers);
-          setTasks(tasksList);
-        })
-        .catch(() => {
-          clearSession();
-        });
+      void retrySession();
       return;
     }
 
@@ -402,12 +527,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       api.listUsers().then((res) => setUsers(sortUsersBySlot(res.users))).catch(() => {});
       api.listTasks().then((fresh) => setTasks(fresh)).catch(() => {});
     }
-  }, [maintenanceStatus?.active, token, user, clearSession]);
+  }, [maintenanceStatus?.active, token, user, retrySession]);
 
   // Detección de conectividad del navegador para sincronización a prueba de fallos de red
   useEffect(() => {
     const handleOnline = () => {
       toast.success('Conexión reestablecida. Sincronizando datos...');
+      if (token && !user) {
+        void retrySession();
+        return;
+      }
       void refreshMaintenance();
       if (token) {
         api.listTasks().then((fresh) => setTasks(fresh)).catch(() => {});
@@ -424,9 +553,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [token, refreshMaintenance]);
+  }, [token, user, refreshMaintenance, retrySession]);
 
   const login = useCallback(async (username: string, password: string) => {
+    unauthorizedNotifiedRef.current = false;
     const res = await api.login(username, password);
     setApiAuthToken(res.token);
     window.localStorage.setItem(TOKEN_STORAGE_KEY, res.token);
@@ -438,6 +568,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setUsers(sortUsersBySlot(usersRes.users));
       setMaxUsers(usersRes.maxUsers);
       setTasks(tasksList);
+      setBootstrapError(null);
     } catch (err) {
       setApiAuthToken(null);
       window.localStorage.removeItem(TOKEN_STORAGE_KEY);
@@ -481,6 +612,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       tasks,
       setTasks,
       isLoading,
+      bootstrapError,
+      isRetryingSession,
+      retrySession,
       isConnected,
       onlineUserIds,
       socket,
@@ -489,10 +623,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       refreshUsers,
       refreshTasks,
-      refreshMaintenance,
+      refreshMaintenance: refreshMaintenanceAndRecover,
       updateMaintenance,
       updateProfile,
       updateMyPassword,
+      registerCommentCreated,
+      registerCommentDeleted,
+      registerAttachmentCreated,
+      registerAttachmentDeleted,
     }),
     [
       user,
@@ -501,6 +639,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       maxUsers,
       tasks,
       isLoading,
+      bootstrapError,
+      isRetryingSession,
+      retrySession,
       isConnected,
       onlineUserIds,
       socket,
@@ -509,10 +650,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       logout,
       refreshUsers,
       refreshTasks,
-      refreshMaintenance,
+      refreshMaintenanceAndRecover,
       updateMaintenance,
       updateProfile,
       updateMyPassword,
+      registerCommentCreated,
+      registerCommentDeleted,
+      registerAttachmentCreated,
+      registerAttachmentDeleted,
     ],
   );
 
